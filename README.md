@@ -83,6 +83,22 @@ make test
   ```
 - 自動起動するエミュレーター名が手元と異なるときは、`Makefile` 内の `run-ios` / `run-android` の `-d` で指定しているデバイス ID を自身の環境に合わせて変更お願いします。
 
-## 6. 参考リンク
+## 6. Firebase CLI を使いたい場合（任意）
+`firebase_options.dart` や `google-services.json` はリポジトリに含まれているので、CLI を使わなくてもアプリは Firebase に接続できます。Firebase の GUI/CLI でデータを操作したいメンバーだけ、次の準備をしてください。
+
+1. Firebase プロジェクトにアクセス権を持つ Google アカウントで招待されていることを確認。
+2. CLI をインストール。
+   ```bash
+   npm install -g firebase-tools
+   dart pub global activate flutterfire_cli
+   export PATH="$HOME/.pub-cache/bin:$PATH"   # 必要なら
+   ```
+3. Firebase にログイン。
+   ```bash
+   firebase login
+   ```
+4. これで `firebase apps:list` などの CLI コマンドが使えます。既存設定を変えたくない場合は `flutterfire configure` は実行せず、リポジトリに含まれているファイルをそのまま利用してください。
+
+## 7. 参考リンク
 - Flutter 公式ドキュメント: https://docs.flutter.dev/
 - Flutter 学習向けチュートリアル: https://docs.flutter.dev/get-started/codelab

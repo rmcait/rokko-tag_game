@@ -1,11 +1,20 @@
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 
-void main() {
-  runApp(const MyApp());
+import 'firebase_options.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+  runApp(const MyApp(firebaseReady: true));
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+  const MyApp({super.key, required this.firebaseReady});
+
+  final bool firebaseReady;
 
   // This widget is the root of your application.
   @override
@@ -30,13 +39,20 @@ class MyApp extends StatelessWidget {
         // tested with just a hot reload.
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: MyHomePage(
+        title: 'Flutter Demo Home Page',
+        firebaseReady: firebaseReady,
+      ),
     );
   }
 }
 
 class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
+  const MyHomePage({
+    super.key,
+    required this.title,
+    required this.firebaseReady,
+  });
 
   // This widget is the home page of your application. It is stateful, meaning
   // that it has a State object (defined below) that contains fields that affect
@@ -48,6 +64,7 @@ class MyHomePage extends StatefulWidget {
   // always marked "final".
 
   final String title;
+  final bool firebaseReady;
 
   @override
   State<MyHomePage> createState() => _MyHomePageState();
@@ -55,6 +72,22 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage> {
   int _counter = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.firebaseReady) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Firebase に接続しました'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      });
+    }
+  }
 
   void _incrementCounter() {
     setState(() {
@@ -109,6 +142,14 @@ class _MyHomePageState extends State<MyHomePage> {
               '$_counter',
               style: Theme.of(context).textTheme.headlineMedium,
             ),
+            if (widget.firebaseReady)
+              const Padding(
+                padding: EdgeInsets.only(top: 16),
+                child: Text(
+                  'Firebase に接続済みです',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
           ],
         ),
       ),
