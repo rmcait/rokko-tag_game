@@ -47,6 +47,12 @@ flutter doctor
    make init
    ```
 
+3. APIkeyの設定を行なってください。（下記はiosの場合）
+  ```bash
+   cp ios/Runner/Config.example.xcconfig ios/Runner/Config.xcconfig
+   ```
+  
+
 ## 3. アプリを動かす
 - 接続済みのデバイスやエミュレーターを確認
   ```bash
