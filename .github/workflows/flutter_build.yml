@@ -11,26 +11,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. Dart を入れる（macOSでは dart じゃなくて dart-sdk）
-      - name: Install Dart SDK
-        run: |
-          brew update
-          brew install dart-sdk
+      # Dart は brew じゃなくて公式アクションで入れる → 速い
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
 
-      # 2. fvm を pub から入れる
+      # fvm / pub のキャッシュ（あると速くなる）
+      - name: Cache fvm and pub
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.fvm
+            ~/.pub-cache
+          key: fvm-${{ runner.os }}-${{ hashFiles('.fvmrc') }}
+          restore-keys: |
+            fvm-${{ runner.os }}-
+
       - name: Install fvm
         run: |
           dart pub global activate fvm
           echo "$HOME/.pub-cache/bin" >> $GITHUB_PATH
 
-      # 3. .fvmrc に従って Flutter を用意
       - name: Setup Flutter via fvm
         run: |
           fvm install
-          fvm flutter --version
           fvm flutter pub get
 
-      # 4. どちらか通ればOKにする
       - name: Build apk or ios
         run: |
           set +e
