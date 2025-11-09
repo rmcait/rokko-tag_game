@@ -1,0 +1,59 @@
+name: Flutter build (at least one)
+
+on:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Dart は brew じゃなくて公式アクションで入れる → 速い
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+
+      # fvm / pub のキャッシュ（あると速くなる）
+      - name: Cache fvm and pub
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.fvm
+            ~/.pub-cache
+          key: fvm-${{ runner.os }}-${{ hashFiles('.fvmrc') }}
+          restore-keys: |
+            fvm-${{ runner.os }}-
+
+      - name: Install fvm
+        run: |
+          dart pub global activate fvm
+          echo "$HOME/.pub-cache/bin" >> $GITHUB_PATH
+
+      - name: Setup Flutter via fvm
+        run: |
+          fvm install
+          fvm flutter pub get
+
+      - name: Build apk or ios
+        run: |
+          set +e
+
+          echo "=== Try Android (apk) build ==="
+          fvm flutter build apk
+          APK_STATUS=$?
+
+          echo "=== Try iOS build (no codesign) ==="
+          fvm flutter build ios --no-codesign
+          IOS_STATUS=$?
+
+          echo "Android build exit code: $APK_STATUS"
+          echo "iOS build exit code: $IOS_STATUS"
+
+          if [ $APK_STATUS -ne 0 ] && [ $IOS_STATUS -ne 0 ]; then
+            echo "Both Flutter builds failed."
+            exit 1
+          fi
+
+          echo "At least one build succeeded 🎉"
