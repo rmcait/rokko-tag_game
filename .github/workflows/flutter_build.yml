@@ -6,14 +6,16 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. dart を入れる（これは brew にある）
-      - name: Install Dart
+      # 1. Dart を入れる（macOSでは dart じゃなくて dart-sdk）
+      - name: Install Dart SDK
         run: |
-          brew install dart
+          brew update
+          brew install dart-sdk
 
       # 2. fvm を pub から入れる
       - name: Install fvm
@@ -21,14 +23,14 @@ jobs:
           dart pub global activate fvm
           echo "$HOME/.pub-cache/bin" >> $GITHUB_PATH
 
-      # 3. プロジェクトの .fvmrc に従って Flutter を用意
+      # 3. .fvmrc に従って Flutter を用意
       - name: Setup Flutter via fvm
         run: |
           fvm install
           fvm flutter --version
           fvm flutter pub get
 
-      # 4. どちらかのビルドが通ればOK
+      # 4. どちらか通ればOKにする
       - name: Build apk or ios
         run: |
           set +e
