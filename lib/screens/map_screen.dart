@@ -36,12 +36,22 @@ class _MapScreenState extends State<MapScreen> {
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
-        if (permission == LocationPermission.denied) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('位置情報の許可が必要です')),
-          );
-          return;
-        }
+      }
+
+      if (permission == LocationPermission.deniedForever) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('位置情報が永続的に拒否されています。設定から許可してください。')),
+        );
+        return;
+      }
+
+      if (permission == LocationPermission.denied) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('位置情報の許可が必要です')),
+        );
+        return;
       }
 
       // 現在地取得
