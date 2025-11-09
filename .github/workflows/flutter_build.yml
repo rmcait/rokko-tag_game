@@ -1,0 +1,51 @@
+name: Flutter build (at least one)
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+      - '**'    # 必要なら
+
+jobs:
+  build:
+    runs-on: macos-latest   # iOSビルドも試したいので macOS にする
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # fvm を使うならここで入れる（.fvmrc がある前提）
+      - name: Install FVM
+        run: |
+          brew install fvm
+          fvm --version
+
+      - name: Install Flutter from fvm
+        run: |
+          fvm install
+          fvm flutter --version
+          fvm flutter pub get
+
+      # どちらかが成功すればOKにするステップ
+      - name: Build apk or ios
+        run: |
+          set +e
+
+          echo "=== Try Android (apk) build ==="
+          fvm flutter build apk
+          APK_STATUS=$?
+
+          echo "=== Try iOS build (no codesign) ==="
+          fvm flutter build ios --no-codesign
+          IOS_STATUS=$?
+
+          echo "Android build exit code: $APK_STATUS"
+          echo "iOS build exit code: $IOS_STATUS"
+
+          # 両方失敗したら CI も失敗させる
+          if [ $APK_STATUS -ne 0 ] && [ $IOS_STATUS -ne 0 ]; then
+            echo "Both Flutter builds failed."
+            exit 1
+          fi
+
+          echo "At least one Flutter build succeeded 🎉"
