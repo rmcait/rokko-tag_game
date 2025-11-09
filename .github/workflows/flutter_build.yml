@@ -10,27 +10,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Flutterを入れる（fvmでバージョン管理したくても、土台は必要）
-      - name: Install Flutter
-        uses: subosito/flutter-action@v2
-        with:
-            flutter-version: 'stable'   # とりあえずstable。fvm側で別バージョンを入れるならここは何でもOK
-            architecture: x64
-            cache: true
+      # 1. dart を入れる（これは brew にある）
+      - name: Install Dart
+        run: |
+          brew install dart
 
-      # fvm を pub から入れる（brewじゃなくてこれ）
+      # 2. fvm を pub から入れる
       - name: Install fvm
         run: |
           dart pub global activate fvm
           echo "$HOME/.pub-cache/bin" >> $GITHUB_PATH
 
-      # プロジェクトの .fvmrc を元にFlutterを入れる
-      - name: Setup flutter via fvm
+      # 3. プロジェクトの .fvmrc に従って Flutter を用意
+      - name: Setup Flutter via fvm
         run: |
           fvm install
           fvm flutter --version
           fvm flutter pub get
 
+      # 4. どちらかのビルドが通ればOK
       - name: Build apk or ios
         run: |
           set +e
