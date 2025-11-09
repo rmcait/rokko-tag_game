@@ -26,11 +26,12 @@ class _MapScreenState extends State<MapScreen> {
       // 位置情報サービスが有効か確認
       final serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('位置情報サービスが無効です')),
         );
         return;
-      }
+      }  
 
       // 権限確認・リクエスト
       LocationPermission permission = await Geolocator.checkPermission();
