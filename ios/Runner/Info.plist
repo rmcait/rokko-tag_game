@@ -30,6 +30,8 @@
 	<string>アプリ内で現在地を表示するために位置情報を使用します。</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>アプリ内で現在地を表示するために位置情報を使用します。</string>
+	<key>GMSApiKey</key>
+	<string>$(GOOGLE_MAPS_API_KEY)</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
