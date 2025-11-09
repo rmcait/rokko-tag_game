@@ -66,10 +66,12 @@ class _MapScreenState extends State<MapScreen> {
         _loading = false;
       });
 
-      // GoogleMapControllerがすでに作られていたら移動
-      _controller?.animateCamera(CameraUpdate.newLatLngZoom(latLng, 16));
-    } catch (e) {
+      } catch (e) {
       debugPrint('位置情報取得エラー: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('位置情報の取得に失敗しました')),
+      );
       setState(() => _loading = false);
     }
   }
