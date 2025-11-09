@@ -15,6 +15,7 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
             flutter-version: 'stable'   # とりあえずstable。fvm側で別バージョンを入れるならここは何でもOK
+            architecture: x64
             cache: true
 
       # fvm を pub から入れる（brewじゃなくてこれ）
