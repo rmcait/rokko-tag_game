@@ -47,11 +47,15 @@ flutter doctor
    make init
    ```
 
-3. APIkeyの設定を行なってください。（下記はiosの場合）
-  ```bash
-   cp ios/Runner/Config.example.xcconfig ios/Runner/Config.xcconfig
-   ```
-  
+3. APIキーの設定  
+   - iOS: `Config.example.xcconfig` をコピーし、実際のキーと Team ID に書き換えてください。
+     ```bash
+     cp ios/Runner/Config.example.xcconfig ios/Runner/Config.xcconfig
+     ```
+   - Android: `local.properties.example` をコピーし、`sdk.dir` と `google.maps.key` を自分の環境に合わせて修正してください。
+     ```bash
+     cp android/local.properties.example android/local.properties
+     ```
 
 ## 3. アプリを動かす
 - 接続済みのデバイスやエミュレーターを確認

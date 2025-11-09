@@ -1,0 +1,8 @@
+# Copy this file to android/local.properties and edit the values.
+# Do NOT commit the real file (android/local.properties is gitignored).
+
+# Android SDK path (adjust to your environment or let Android Studio regenerate).
+sdk.dir=/path/to/Android/sdk
+
+# Google Maps API key for Android (used by Gradle manifestPlaceholders).
+google.maps.key=YOUR_ANDROID_MAPS_KEY
