@@ -1,26 +1,26 @@
 import 'package:flutter/material.dart';
 
 import '../../../data/repository.dart';
-import '../../../data/services/api_service.dart';
+import '../../../data/services/firestore_user_service.dart';
 import '../../../domain/entities.dart';
 
 class HomeViewModel extends ChangeNotifier {
   HomeViewModel({
-    SampleRepository? repository,
-  }) : _repository = repository ?? SampleRepository(ApiService());
+    UserRepository? repository,
+  }) : _repository = repository ?? UserRepository(FirestoreUserService());
 
-  final SampleRepository _repository;
+  final UserRepository _repository;
 
-  SampleEntity? _welcomeMessage;
+  UserEntity? _user;
   bool _isLoading = false;
 
-  SampleEntity? get welcomeMessage => _welcomeMessage;
+  UserEntity? get user => _user;
   bool get isLoading => _isLoading;
 
   Future<void> load() async {
     _isLoading = true;
     notifyListeners();
-    _welcomeMessage = await _repository.loadWelcomeMessage();
+    _user = await _repository.fetchLatestUserAndTouch();
     _isLoading = false;
     notifyListeners();
   }

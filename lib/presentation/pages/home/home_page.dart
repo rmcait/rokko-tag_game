@@ -34,8 +34,12 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    final message =
-        _viewModel.welcomeMessage?.message ?? '読み込み中...';
+    final user = _viewModel.user;
+    final isLoading = _viewModel.isLoading;
+    final updatedAt = user?.updatedAt;
+    final message = user == null
+        ? (isLoading ? '読み込み中...' : 'ユーザーデータが見つかりません')
+        : '${user.displayName}\nstatus: ${user.status}';
 
     return Scaffold(
       appBar: AppBar(
@@ -52,10 +56,17 @@ class _HomePageState extends State<HomePage> {
                 style: Theme.of(context).textTheme.headlineMedium,
                 textAlign: TextAlign.center,
               ),
+              if (updatedAt != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  'updatedAt: $updatedAt',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
               const SizedBox(height: 24),
               CustomButton(
-                label: _viewModel.isLoading ? 'Loading...' : 'Reload data',
-                onPressed: _viewModel.isLoading
+                label: isLoading ? 'Loading...' : 'Reload data',
+                onPressed: isLoading
                     ? null
                     : () {
                         AppLogger.info('Reload tapped');

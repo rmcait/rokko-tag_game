@@ -1,15 +1,18 @@
 import '../domain/entities.dart';
-import 'models/sample_model.dart';
-import 'services/api_service.dart';
+import 'services/firestore_user_service.dart';
 
-/// データ取得の統一窓口。
-class SampleRepository {
-  SampleRepository(this._apiService);
+/// Firestore 上のユーザーデータを扱うリポジトリ。
+class UserRepository {
+  UserRepository(this._userService);
 
-  final ApiService _apiService;
+  final FirestoreUserService _userService;
 
-  Future<SampleEntity> loadWelcomeMessage() async {
-    final response = await _apiService.fetchWelcomeMessage();
-    return SampleModel.fromJson(response).toEntity();
+  Future<UserEntity?> fetchLatestUserAndTouch() async {
+    final model = await _userService.fetchSampleUser();
+    if (model == null) {
+      return null;
+    }
+    await _userService.touchUser(model.userId);
+    return model.toEntity();
   }
 }
