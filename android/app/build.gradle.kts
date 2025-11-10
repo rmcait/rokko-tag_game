@@ -1,3 +1,5 @@
+import com.android.build.gradle.internal.cxx.configure.gradleLocalProperties
+
 plugins {
     id("com.android.application")
     // START: FlutterFire Configuration
@@ -7,7 +9,11 @@ plugins {
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
-
+val localProps = gradleLocalProperties(rootDir, providers)
+val googleMapsKey: String = localProps.getProperty("google.maps.key")
+    ?: System.getenv("GOOGLE_MAPS_API_KEY")
+    ?: ""
+    
 android {
     namespace = "com.example.tag_game"
     compileSdk = flutter.compileSdkVersion
@@ -31,6 +37,7 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        manifestPlaceholders["GOOGLE_MAPS_API_KEY"] = googleMapsKey
     }
 
     buildTypes {

@@ -2,6 +2,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 
 import 'firebase_options.dart';
+import 'screens/map_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -39,6 +40,9 @@ class MyApp extends StatelessWidget {
         // tested with just a hot reload.
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
+      routes: {
+        '/map': (_) => MapScreen(), // ← 追加
+      },
       home: MyHomePage(
         title: 'Flutter Demo Home Page',
         firebaseReady: firebaseReady,
@@ -150,6 +154,11 @@ class _MyHomePageState extends State<MyHomePage> {
                   style: TextStyle(fontWeight: FontWeight.bold),
                 ),
               ),
+              ElevatedButton.icon(
+              onPressed: () => Navigator.of(context).pushNamed('/map'),
+              icon: const Icon(Icons.map),
+              label: const Text('地図をひらく'),
+            ),
           ],
         ),
       ),
