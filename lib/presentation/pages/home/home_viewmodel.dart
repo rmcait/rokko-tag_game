@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import '../../../data/models/user_model.dart';
+import '../../../data/models/firebase_user_model.dart';
 import '../../../data/services/auth_service.dart';
 
 /// ホーム画面のViewModel
@@ -17,7 +17,7 @@ class HomeViewModel extends ChangeNotifier {
       await _authService.signOut();
       notifyListeners();
     } catch (e) {
-      print('サインアウトエラー: $e');
+      debugPrint('サインアウトエラー: $e');
       rethrow;
     }
   }

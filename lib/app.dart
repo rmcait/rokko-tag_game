@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+<<<<<<< HEAD
 import 'package:provider/provider.dart';
 import 'data/services/auth_service.dart';
 import 'presentation/pages/login/login_page.dart';
@@ -122,6 +123,24 @@ class MyApp extends StatelessWidget {
           '/home': (context) => const HomePage(),
         },
       ),
+=======
+
+import 'core/theme/app_theme.dart';
+import 'presentation/routes.dart';
+
+/// ルーティングとテーマをまとめたアプリのエントリーポイント。
+class TagGameApp extends StatelessWidget {
+  const TagGameApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Tag Game',
+      theme: buildAppTheme(),
+      initialRoute: AppRoutes.login,
+      onGenerateRoute: AppRouter.onGenerateRoute,
+      debugShowCheckedModeBanner: false,
+>>>>>>> 9b9f9c963f02aec80ef4b23e24e2d55f611c784e
     );
   }
 }

@@ -1,27 +1,24 @@
 import 'package:flutter/material.dart';
 
-/// ルーティング設定
-class AppRoutes {
-  static const String login = '/login';
-  static const String home = '/home';
+import 'pages/home/home_page.dart';
+import 'pages/login/login_page.dart';
 
-  static Route<dynamic> generateRoute(RouteSettings settings) {
+class AppRoutes {
+  static const home = '/';
+  static const login = '/login';
+}
+
+class AppRouter {
+  static Route<dynamic> onGenerateRoute(RouteSettings settings) {
     switch (settings.name) {
-      case login:
-        return MaterialPageRoute(
-          builder: (_) => const Placeholder(), // LoginPageで置き換え
+      case AppRoutes.login:
+        return MaterialPageRoute<void>(
+          builder: (_) => const LoginPage(),
         );
-      case home:
-        return MaterialPageRoute(
-          builder: (_) => const Placeholder(), // HomePageで置き換え
-        );
+      case AppRoutes.home:
       default:
-        return MaterialPageRoute(
-          builder: (_) => Scaffold(
-            body: Center(
-              child: Text('ルートが見つかりません: ${settings.name}'),
-            ),
-          ),
+        return MaterialPageRoute<void>(
+          builder: (_) => const HomePage(),
         );
     }
   }
