@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/utils/logger.dart';
+import '../../routes.dart';
 import '../../widgets/custom_button.dart';
 import 'home_viewmodel.dart';
 
@@ -72,6 +73,13 @@ class _HomePageState extends State<HomePage> {
                         AppLogger.info('Reload tapped');
                         _viewModel.load();
                       },
+              ),
+              const SizedBox(height: 12),
+              CustomButton(
+                label: '地図を開く',
+                onPressed: () {
+                  Navigator.of(context).pushNamed(AppRoutes.map);
+                },
               ),
             ],
           ),
