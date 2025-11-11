@@ -1,0 +1,3 @@
+## Copy to android/local.properties and edit.
+sdk.dir=/path/to/Android/sdk
+google.maps.key=YOUR_ANDROID_MAPS_KEY
