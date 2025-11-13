@@ -1,4 +1,8 @@
 import 'package:flutter/material.dart';
+
+import '../../../core/utils/logger.dart';
+import '../../routes.dart';
+import '../../widgets/custom_button.dart';
 import 'package:provider/provider.dart';
 import '../../routes.dart';
 import 'home_viewmodel.dart';
@@ -115,6 +119,17 @@ class HomePage extends StatelessWidget {
                   subtitle: '既存のゲームルームに参加する',
                   onTap: () {
                     Navigator.pushNamed(context, AppRoutes.joinRoom);
+                  },
+                ),
+                const SizedBox(height: 12),
+                
+                //いったん地図表示
+                _MenuButton(
+                  icon: Icons.map_outlined,
+                  title: '地図を開く',
+                  subtitle: '鬼ごっこのフィールドを確認する',
+                  onTap: () {
+                    Navigator.pushNamed(context, AppRoutes.map);
                   },
                 ),
               ],

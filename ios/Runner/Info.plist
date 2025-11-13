@@ -24,6 +24,12 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>現在地を表示するために位置情報へのアクセスが必要です。</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>アプリ起動中に現在地を追跡するため位置情報を使用します。</string>
+	<key>GMSApiKey</key>
+	<string>$(GOOGLE_MAPS_API_KEY)</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
@@ -45,17 +51,16 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
-	<!-- dictタグ内の追記する部分のみ抜粋-->
-<key>CFBundleURLTypes</key>
-<array>
-    <dict>
-        <key>CFBundleTypeRole</key>
-        <string>Editor</string>
-        <key>CFBundleURLSchemes</key>
-        <array>
-            <string>com.googleusercontent.apps.177628054151-hb20hk2vc7g1h46h22uhu8thj3kkdb2c</string>
-        </array>
-    </dict>
-</array>
+  <key>CFBundleURLTypes</key>
+  <array>
+      <dict>
+          <key>CFBundleTypeRole</key>
+          <string>Editor</string>
+          <key>CFBundleURLSchemes</key>
+          <array>
+              <string>com.googleusercontent.apps.177628054151-hb20hk2vc7g1h46h22uhu8thj3kkdb2c</string>
+          </array>
+      </dict>
+  </array>
 </dict>
 </plist>
