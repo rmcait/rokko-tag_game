@@ -1,27 +1,24 @@
 import 'package:flutter/material.dart';
+import '../../../data/models/firebase_user_model.dart';
+import '../../../data/services/auth_service.dart';
 
-import '../../../data/repository.dart';
-import '../../../data/services/firestore_user_service.dart';
-import '../../../domain/entities.dart';
-
+/// ホーム画面のViewModel
 class HomeViewModel extends ChangeNotifier {
-  HomeViewModel({
-    UserRepository? repository,
-  }) : _repository = repository ?? UserRepository(FirestoreUserService());
+  final AuthService _authService;
 
-  final UserRepository _repository;
+  HomeViewModel(this._authService);
 
-  UserEntity? _user;
-  bool _isLoading = false;
+  /// 現在のユーザー情報を取得
+  UserModel? get currentUser => _authService.currentUserModel;
 
-  UserEntity? get user => _user;
-  bool get isLoading => _isLoading;
-
-  Future<void> load() async {
-    _isLoading = true;
-    notifyListeners();
-    _user = await _repository.fetchLatestUserAndTouch();
-    _isLoading = false;
-    notifyListeners();
+  /// サインアウト処理
+  Future<void> signOut() async {
+    try {
+      await _authService.signOut();
+      notifyListeners();
+    } catch (e) {
+      debugPrint('サインアウトエラー: $e');
+      rethrow;
+    }
   }
 }
