@@ -1,6 +1,7 @@
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
-import '../models/user_model.dart';
+import '../models/firebase_user_model.dart';
 
 /// 認証サービス
 /// Firebase AuthとGoogle Sign-Inを管理
@@ -53,7 +54,7 @@ class AuthService {
 
       return null;
     } catch (e) {
-      print('Googleサインインエラー: $e');
+      debugPrint('Googleサインインエラー: $e');
       rethrow;
     }
   }
@@ -69,7 +70,7 @@ class AuthService {
 
       return null;
     } catch (e) {
-      print('匿名サインインエラー: $e');
+      debugPrint('匿名サインインエラー: $e');
       rethrow;
     }
   }
@@ -82,7 +83,7 @@ class AuthService {
         _googleSignIn.signOut(),
       ]);
     } catch (e) {
-      print('サインアウトエラー: $e');
+      debugPrint('サインアウトエラー: $e');
       rethrow;
     }
   }

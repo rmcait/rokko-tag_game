@@ -15,6 +15,11 @@ class AppRouter {
         return MaterialPageRoute<void>(
           builder: (_) => const LoginPage(),
         );
+      case '/home':
+        // Accept '/home' as an alias for the home route
+        return MaterialPageRoute<void>(
+          builder: (_) => const HomePage(),
+        );
       case AppRoutes.home:
       default:
         return MaterialPageRoute<void>(

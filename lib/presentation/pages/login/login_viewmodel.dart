@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import '../../../data/models/user_model.dart';
+import '../../../data/models/firebase_user_model.dart';
 import '../../../data/services/auth_service.dart';
 
 /// ログイン画面のViewModel

@@ -1,19 +1,14 @@
 import 'package:flutter/material.dart';
-<<<<<<< HEAD
 import 'package:provider/provider.dart';
 import 'login_viewmodel.dart';
 
 /// ログイン画面
-=======
-
->>>>>>> 9b9f9c963f02aec80ef4b23e24e2d55f611c784e
 class LoginPage extends StatelessWidget {
   const LoginPage({super.key});
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-<<<<<<< HEAD
       body: SafeArea(
         child: Center(
           child: Padding(
@@ -158,11 +153,6 @@ class LoginPage extends StatelessWidget {
             ),
           ),
         ),
-=======
-      appBar: AppBar(title: const Text('ログイン')),
-      body: const Center(
-        child: Text('ログイン画面の UI をここに実装します。'),
->>>>>>> 9b9f9c963f02aec80ef4b23e24e2d55f611c784e
       ),
     );
   }
