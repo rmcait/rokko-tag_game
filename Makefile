@@ -38,7 +38,7 @@ run-ios:
 
 # Androidエミュレータ
 run-android:
-	fvm flutter emulators --launch Pixel_8_API_34
+	fvm flutter emulators --launch Pixel_8
 	sleep 7
 	fvm flutter run -d "emulator-5554"
 

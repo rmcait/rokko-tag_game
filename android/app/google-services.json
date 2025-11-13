@@ -12,7 +12,20 @@
           "package_name": "com.example.tag_game"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "177628054151-85dmk8tl6cke4nj5q6rdb9flka4dr3ia.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.tag_game",
+            "certificate_hash": "095467e5a5aab431f4cc6bf5eb6bf7886eb623fd"
+          }
+        },
+        {
+          "client_id": "177628054151-8b0t7lsp2nm4rkdakc81o8c6eag0fnrd.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyDR8mvXTJq_uCoqNvp3G8OGVav_-sWx1w8"
@@ -20,7 +33,19 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "177628054151-8b0t7lsp2nm4rkdakc81o8c6eag0fnrd.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "177628054151-hb20hk2vc7g1h46h22uhu8thj3kkdb2c.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.tagGame"
+              }
+            }
+          ]
         }
       }
     }
