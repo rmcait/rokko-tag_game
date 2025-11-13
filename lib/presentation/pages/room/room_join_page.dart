@@ -10,28 +10,20 @@ class RoomJoinPage extends StatefulWidget {
 }
 
 class _RoomJoinPageState extends State<RoomJoinPage> {
+  static const int _roomCodeLength = 6;
   late final TextEditingController _codeController;
 
   @override
   void initState() {
     super.initState();
-    _codeController = TextEditingController()..addListener(_onCodeChanged);
+    _codeController = TextEditingController();
   }
 
   @override
   void dispose() {
-    _codeController
-      ..removeListener(_onCodeChanged)
-      ..dispose();
+    _codeController.dispose();
     super.dispose();
   }
-
-  void _onCodeChanged() {
-    // 再描画してボタンの活性状態を更新する。
-    setState(() {});
-  }
-
-  bool get _isCodeComplete => _codeController.text.length == 6;
 
   void _handleJoin() {
     FocusScope.of(context).unfocus();
@@ -83,28 +75,35 @@ class _RoomJoinPageState extends State<RoomJoinPage> {
                 ),
                 inputFormatters: [
                   _RoomCodeInputFormatter(),
-                  LengthLimitingTextInputFormatter(6),
+                  LengthLimitingTextInputFormatter(_roomCodeLength),
                 ],
               ),
               const Spacer(),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  onPressed: _isCodeComplete ? _handleJoin : null,
-                  style: FilledButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    backgroundColor: Colors.amberAccent,
-                    foregroundColor: Colors.black87,
-                    disabledBackgroundColor: Colors.grey,
-                  ),
-                  child: const Text(
-                    '参加',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
+              ValueListenableBuilder<TextEditingValue>(
+                valueListenable: _codeController,
+                builder: (context, value, child) {
+                  final isCodeComplete = value.text.length == _roomCodeLength;
+                  return SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      onPressed: isCodeComplete ? _handleJoin : null,
+                      style: FilledButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        // 例
+                        backgroundColor: Theme.of(context).colorScheme.primary,
+                        foregroundColor: Theme.of(context).colorScheme.onPrimary,
+                        disabledBackgroundColor: Theme.of(context).colorScheme.onSurface.withOpacity(0.12),
+                      ),
+                      child: const Text(
+                        '参加',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
                     ),
-                  ),
-                ),
+                  );
+                },
               ),
             ],
           ),
