@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 
 import 'pages/home/home_page.dart';
 import 'pages/login/login_page.dart';
+import 'pages/room/room_join_page.dart';
 
 class AppRoutes {
   static const home = '/';
   static const login = '/login';
+  static const joinRoom = '/join-room';
 }
 
 class AppRouter {
@@ -19,6 +21,10 @@ class AppRouter {
         // Accept '/home' as an alias for the home route
         return MaterialPageRoute<void>(
           builder: (_) => const HomePage(),
+        );
+      case AppRoutes.joinRoom:
+        return MaterialPageRoute<void>(
+          builder: (_) => const RoomJoinPage(),
         );
       case AppRoutes.home:
       default:

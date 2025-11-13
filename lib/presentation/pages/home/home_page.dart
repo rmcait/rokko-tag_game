@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../routes.dart';
 import 'home_viewmodel.dart';
 
 /// ホーム画面（ログイン後のメイン画面）
@@ -113,10 +114,7 @@ class HomePage extends StatelessWidget {
                   title: 'ルームに参加',
                   subtitle: '既存のゲームルームに参加する',
                   onTap: () {
-                    // TODO: ルーム一覧画面へ遷移
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('ルーム参加機能は開発中です')),
-                    );
+                    Navigator.pushNamed(context, AppRoutes.joinRoom);
                   },
                 ),
               ],
