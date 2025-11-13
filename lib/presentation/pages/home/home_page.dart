@@ -121,6 +121,17 @@ class HomePage extends StatelessWidget {
                     Navigator.pushNamed(context, AppRoutes.joinRoom);
                   },
                 ),
+                const SizedBox(height: 12),
+                
+                //いったん地図表示
+                _MenuButton(
+                  icon: Icons.map_outlined,
+                  title: '地図を開く',
+                  subtitle: '鬼ごっこのフィールドを確認する',
+                  onTap: () {
+                    Navigator.pushNamed(context, AppRoutes.map);
+                  },
+                ),
               ],
             ),
           );
@@ -189,13 +200,6 @@ class _MenuButton extends StatelessWidget {
                     ),
                   ],
                 ),
-              ),
-              const SizedBox(height: 12),
-              CustomButton(
-                label: '地図を開く',
-                onPressed: () {
-                  Navigator.of(context).pushNamed(AppRoutes.map);
-                },
               ),
               const Icon(Icons.arrow_forward_ios, size: 20),
             ],

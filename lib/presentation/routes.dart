@@ -22,6 +22,7 @@ class AppRouter {
       case AppRoutes.map:
         return MaterialPageRoute<void>(
           builder: (_) => const MapPage(),
+        );
       case '/home':
         // Accept '/home' as an alias for the home route
         return MaterialPageRoute<void>(
