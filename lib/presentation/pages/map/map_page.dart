@@ -134,16 +134,38 @@ class _MapPageState extends State<MapPage> {
               zoom: 16,
             ),
             myLocationEnabled: true,
-            myLocationButtonEnabled: true,
-            onTap: _onMapTap,        // ← ここでタップを拾う
+            myLocationButtonEnabled: false,
+            onTap: _onMapTap,
             markers: _markers,
             polygons: _polygons,
           ),
+          // ガイドカード
           Positioned(
             left: 16,
             right: 16,
-            bottom: 90,
+            bottom: 60,
             child: _buildGuideCard(),
+          ),
+          // ズームボタン（＋ / −）
+          Positioned(
+            right: 16,
+            bottom: 140,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FloatingActionButton.small(
+                  heroTag: 'zoom_in',
+                  onPressed: _onZoomIn,
+                  child: const Icon(Icons.add),
+                ),
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                  heroTag: 'zoom_out',
+                  onPressed: _onZoomOut,
+                  child: const Icon(Icons.remove),
+                ),
+              ],
+            ),
           ),
         ],
       );
@@ -170,41 +192,66 @@ class _MapPageState extends State<MapPage> {
       bottomNavigationBar: (!_isLoading && _errorMessage == null)
           ? SafeArea(
               minimum: const EdgeInsets.all(16),
-              child: ElevatedButton.icon(
-                onPressed: canConfirm ? _onConfirmPressed : null,
-                icon: const Icon(Icons.check),
-                label: Text(
-                  canConfirm
-                      ? 'この4点でフィールドを確定'
-                      : 'フィールドの頂点を4点タップしてください（${_points.length}/4）',
-                ),
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_points.isNotEmpty)
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton.icon(
+                        onPressed: _undoLastPoint,
+                        icon: const Icon(Icons.undo),
+                        label: const Text('最後の頂点を取り消す'),
+                      ),
+                    ),
+                  ElevatedButton.icon(
+                    onPressed: canConfirm ? _onConfirmPressed : null,
+                    icon: const Icon(Icons.check),
+                    label: Text(
+                      canConfirm
+                          ? 'この4点でフィールドを確定'
+                          : 'フィールドの頂点を4点タップしてください（${_points.length}/4）',
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      minimumSize: const Size.fromHeight(48),
+                    ),
+                  ),
+                ],
               ),
             )
           : null,
     );
   }
 
-  /// 下部のガイドカード
+  /// 下部のガイドカード（注意書き付き）
   Widget _buildGuideCard() {
     return Card(
       elevation: 4,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
         padding: const EdgeInsets.all(12),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Icon(Icons.touch_app),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                _points.isEmpty
-                    ? 'マップをタップしてフィールドの1点目を置きます'
-                    : 'マップ上をタップして残りの頂点を置いてください（${_points.length}/4）',
-                style: const TextStyle(fontSize: 13),
-              ),
+            Row(
+              children: [
+                const Icon(Icons.touch_app),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _points.isEmpty
+                        ? 'マップをタップしてフィールドの1点目を置きます'
+                        : 'マップ上をタップして残りの頂点を置いてください（${_points.length}/4）',
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              '※ マーカーは長押ししてドラッグすると位置を微調整できます。',
+              style: TextStyle(fontSize: 11, color: Colors.grey),
             ),
           ],
         ),
@@ -223,20 +270,12 @@ class _MapPageState extends State<MapPage> {
 
     setState(() {
       _points.add(position);
-
-      _markers.add(
-        Marker(
-          markerId: MarkerId('p${_points.length}'),
-          position: position,
-          infoWindow: InfoWindow(title: '頂点 ${_points.length}'),
-        ),
-      );
-
+      _rebuildMarkers();
       _updatePolygon();
     });
   }
 
-  /// 3点以上でポリゴンを描画
+  /// ポリゴンを再描画（3点以上で描画）
   void _updatePolygon() {
     _polygons.clear();
 
@@ -256,13 +295,56 @@ class _MapPageState extends State<MapPage> {
     );
   }
 
-  /// フィールドをリセット
+  /// マーカーを_pointsから作り直す（ドラッグ後もこれを使う）
+  void _rebuildMarkers() {
+    _markers.clear();
+    for (var i = 0; i < _points.length; i++) {
+      final point = _points[i];
+      _markers.add(
+        Marker(
+          markerId: MarkerId('p$i'),
+          position: point,
+          infoWindow: InfoWindow(title: '頂点 ${i + 1}'),
+          draggable: true,
+          onDragEnd: (newPosition) {
+            setState(() {
+              _points[i] = newPosition;
+              _rebuildMarkers();
+              _updatePolygon();
+            });
+          },
+        ),
+      );
+    }
+  }
+
+  /// フィールドを全部リセット
   void _resetField() {
     setState(() {
       _points.clear();
       _markers.clear();
       _polygons.clear();
     });
+  }
+
+  /// 最後の頂点だけ消す（Undo）
+  void _undoLastPoint() {
+    if (_points.isEmpty) return;
+    setState(() {
+      _points.removeLast();
+      _rebuildMarkers();
+      _updatePolygon();
+    });
+  }
+
+  /// ズームイン
+  void _onZoomIn() {
+    _mapController?.animateCamera(CameraUpdate.zoomIn());
+  }
+
+  /// ズームアウト
+  void _onZoomOut() {
+    _mapController?.animateCamera(CameraUpdate.zoomOut());
   }
 
   /// 確定：4点を前の画面へ返す
