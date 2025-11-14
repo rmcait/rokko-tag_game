@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:tag_game/data/services/field_service.dart';
-
+import 'map_page.dart';
 import 'field_preview_page.dart'; // 次に作るプレビュー画面
 
 class FieldHistoryPage extends StatelessWidget {
@@ -40,7 +40,10 @@ class FieldHistoryPage extends StatelessWidget {
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (_) => FieldPreviewPage(field: field),
+                        builder: (_) => MapPage(
+                          initialPoints: field.vertices,
+                          isEditing: true,
+                        ),
                       ),
                     );
                   },

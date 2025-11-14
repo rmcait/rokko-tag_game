@@ -5,7 +5,13 @@ import 'package:tag_game/data/services/field_service.dart';
 import 'package:tag_game/presentation/pages/map/field_history_page.dart';
 
 class MapPage extends StatefulWidget {
-  const MapPage({super.key});
+  final List<LatLng>? initialPoints;
+  final bool isEditing;
+  const MapPage({
+    super.key,
+    this.initialPoints,
+    this.isEditing = false,
+  });
 
   @override
   State<MapPage> createState() => _MapPageState();
@@ -31,6 +37,14 @@ class _MapPageState extends State<MapPage> {
   void initState() {
     super.initState();
     _loadCurrentLocation();
+
+    if (widget.initialPoints != null) {
+      _points.addAll(widget.initialPoints!);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _rebuildMarkers();
+        _updatePolygon();
+      });
+    }
   }
 
   Future<void> _loadCurrentLocation() async {
@@ -229,9 +243,11 @@ class _MapPageState extends State<MapPage> {
                     onPressed: canConfirm ? _onConfirmPressed : null,
                     icon: const Icon(Icons.check),
                     label: Text(
-                      canConfirm
-                          ? 'この4点でフィールドを確定'
-                          : 'フィールドの頂点を4点タップしてください（${_points.length}/4）',
+                      widget.isEditing
+                          ? 'このフィールドでOK'
+                          : (canConfirm
+                              ? 'この4点でフィールドを確定'
+                              : 'フィールドの頂点を4点タップしてください（${_points.length}/4）'),
                     ),
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 16),
@@ -391,6 +407,15 @@ class _MapPageState extends State<MapPage> {
   Future<void> _onConfirmPressed() async {
     if (_points.length != 4) return;
 
+    if (widget.isEditing) {
+    //デバック用
+    print('[EDIT] このフィールドでOK: $_points');
+
+    Navigator.of(context).pop(_points);
+    return;
+    // もし将来的に「編集内容を上書き保存」したくなったら
+    // ここで FieldService().updateField(...) を呼べばOK
+  }
     // 保存しない（一回限り）の場合
     if (!_saveAsTemplate) {
       Navigator.of(context).pop(_points);
