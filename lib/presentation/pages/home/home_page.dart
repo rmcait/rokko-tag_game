@@ -7,6 +7,9 @@ import 'package:provider/provider.dart';
 import '../../routes.dart';
 import 'home_viewmodel.dart';
 
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:tag_game/data/services/field_service.dart';
+
 /// ホーム画面（ログイン後のメイン画面）
 class HomePage extends StatelessWidget {
   const HomePage({super.key});
@@ -127,9 +130,32 @@ class HomePage extends StatelessWidget {
                 _MenuButton(
                   icon: Icons.map_outlined,
                   title: '地図を開く',
-                  subtitle: '鬼ごっこのフィールドを確認する',
-                  onTap: () {
-                    Navigator.pushNamed(context, AppRoutes.map);
+                  subtitle: '鬼ごっこのエリアを決める',
+                  onTap: () async {
+                  // MapPage を開いて、4点の戻り値を受け取る
+                    final result = await Navigator.pushNamed(
+                      context,
+                      AppRoutes.map,
+                    );
+
+                    // 戻ってきた値の型と中身をチェック
+                    if (result is! List<LatLng> || result.length != 4) {
+                      // キャンセルされた or 不正
+                      return;
+                    }
+
+                    final points = result;
+
+                    // フィールド保存
+                    final fieldId = await FieldService().createField(
+                      vertices: points,
+                    );
+
+                    if (!context.mounted) return;
+
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('フィールドを作成しました（ID: $fieldId）')),
+                    );
                   },
                 ),
               ],
