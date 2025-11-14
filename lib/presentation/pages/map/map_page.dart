@@ -149,8 +149,8 @@ class _MapPageState extends State<MapPage> {
           // ズームボタン（＋ / −）
           Positioned(
             right: 16,
-            bottom: 140,
-            child: Column(
+            bottom: 10,
+            child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
                 FloatingActionButton.small(
