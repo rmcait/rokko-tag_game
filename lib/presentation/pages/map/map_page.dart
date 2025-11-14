@@ -15,6 +15,13 @@ class _MapPageState extends State<MapPage> {
   bool _isLoading = true;
   String? _errorMessage;
 
+  /// ユーザーがタップした頂点（最大4つ）
+  final List<LatLng> _points = [];
+
+  /// マーカーとポリゴン
+  final Set<Marker> _markers = {};
+  final Set<Polygon> _polygons = {};
+
   @override
   void initState() {
     super.initState();
@@ -84,6 +91,9 @@ class _MapPageState extends State<MapPage> {
 
   @override
   Widget build(BuildContext context) {
+    final canConfirm =
+        !_isLoading && _errorMessage == null && _points.length == 4;
+
     Widget body;
     if (_isLoading) {
       body = const Center(child: CircularProgressIndicator());
@@ -115,29 +125,149 @@ class _MapPageState extends State<MapPage> {
         ),
       );
     } else {
-      body = GoogleMap(
-        onMapCreated: _onMapCreated,
-        initialCameraPosition: CameraPosition(
-          target: _currentLatLng ?? const LatLng(35.681236, 139.767125),
-          zoom: 16,
-        ),
-        myLocationEnabled: true,
-        myLocationButtonEnabled: true,
+      body = Stack(
+        children: [
+          GoogleMap(
+            onMapCreated: _onMapCreated,
+            initialCameraPosition: CameraPosition(
+              target: _currentLatLng ?? const LatLng(35.681236, 139.767125),
+              zoom: 16,
+            ),
+            myLocationEnabled: true,
+            myLocationButtonEnabled: true,
+            onTap: _onMapTap,        // ← ここでタップを拾う
+            markers: _markers,
+            polygons: _polygons,
+          ),
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: 90,
+            child: _buildGuideCard(),
+          ),
+        ],
       );
     }
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('現在地マップ'),
+        title: const Text('フィールドを設定'),
         actions: [
           IconButton(
             onPressed: _isLoading ? null : _loadCurrentLocation,
             icon: const Icon(Icons.my_location),
             tooltip: '現在地を再取得',
           ),
+          if (_points.isNotEmpty && !_isLoading && _errorMessage == null)
+            IconButton(
+              onPressed: _resetField,
+              icon: const Icon(Icons.refresh),
+              tooltip: 'フィールドをリセット',
+            ),
         ],
       ),
       body: body,
+      bottomNavigationBar: (!_isLoading && _errorMessage == null)
+          ? SafeArea(
+              minimum: const EdgeInsets.all(16),
+              child: ElevatedButton.icon(
+                onPressed: canConfirm ? _onConfirmPressed : null,
+                icon: const Icon(Icons.check),
+                label: Text(
+                  canConfirm
+                      ? 'この4点でフィールドを確定'
+                      : 'フィールドの頂点を4点タップしてください（${_points.length}/4）',
+                ),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                ),
+              ),
+            )
+          : null,
     );
+  }
+
+  /// 下部のガイドカード
+  Widget _buildGuideCard() {
+    return Card(
+      elevation: 4,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            const Icon(Icons.touch_app),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                _points.isEmpty
+                    ? 'マップをタップしてフィールドの1点目を置きます'
+                    : 'マップ上をタップして残りの頂点を置いてください（${_points.length}/4）',
+                style: const TextStyle(fontSize: 13),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 地図タップ時：最大4点まで追加
+  void _onMapTap(LatLng position) {
+    if (_points.length >= 4) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('頂点は4点までです。リセットしてやり直してください。')),
+      );
+      return;
+    }
+
+    setState(() {
+      _points.add(position);
+
+      _markers.add(
+        Marker(
+          markerId: MarkerId('p${_points.length}'),
+          position: position,
+          infoWindow: InfoWindow(title: '頂点 ${_points.length}'),
+        ),
+      );
+
+      _updatePolygon();
+    });
+  }
+
+  /// 3点以上でポリゴンを描画
+  void _updatePolygon() {
+    _polygons.clear();
+
+    if (_points.length < 3) return;
+
+    final List<LatLng> polygonPoints = List.from(_points);
+    polygonPoints.add(_points.first); // 図形を閉じる
+
+    _polygons.add(
+      Polygon(
+        polygonId: const PolygonId('field'),
+        points: polygonPoints,
+        strokeWidth: 2,
+        strokeColor: Colors.deepPurple,
+        fillColor: Colors.deepPurple.withOpacity(0.15),
+      ),
+    );
+  }
+
+  /// フィールドをリセット
+  void _resetField() {
+    setState(() {
+      _points.clear();
+      _markers.clear();
+      _polygons.clear();
+    });
+  }
+
+  /// 確定：4点を前の画面へ返す
+  void _onConfirmPressed() {
+    if (_points.length != 4) return;
+    Navigator.of(context).pop<List<LatLng>>(_points);
   }
 }
