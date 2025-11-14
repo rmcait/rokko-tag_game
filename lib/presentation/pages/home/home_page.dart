@@ -139,16 +139,18 @@ class HomePage extends StatelessWidget {
 
                     // 戻ってきた値の型と中身をチェック
                     if (result is! List<LatLng> || result.length != 4) {
-                      // キャンセルされた or 不正
+                      AppLogger.info("[デバッグ] フィールド未保存（トグルOFF）");
+                      AppLogger.info("points = $result");
                       return;
                     }
 
+                    //mapから所得したエリア情報が入る！！！！！！
                     final points = result;
-
-                    // フィールド保存
-                    // final fieldId = await FieldService().createField(
-                    //   vertices: points,
-                    // );
+                    //デバック用にターミナルにデータを表示;
+                    AppLogger.info(
+                      "points:\n" +
+                        points.map((p) => "・(${p.latitude}, ${p.longitude})").join("\n")
+                    );
 
                     if (!context.mounted) return;
 
