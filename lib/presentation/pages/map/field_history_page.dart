@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:tag_game/data/services/field_service.dart';
 import 'map_page.dart';
-import 'field_preview_page.dart'; // 次に作るプレビュー画面
 
 class FieldHistoryPage extends StatelessWidget {
   const FieldHistoryPage({super.key});
@@ -36,9 +36,9 @@ class FieldHistoryPage extends StatelessWidget {
                     '頂点数: ${field.vertices.length}   作成日: ${field.createdAt ?? "-"}',
                   ),
                   trailing: const Icon(Icons.arrow_forward_ios, size: 16),
-                  onTap: () {
-                    Navigator.push(
-                      context,
+                  onTap: () async {
+                    // 1. 編集用 MapPage を開く
+                    final result = await Navigator.of(context).push<List<LatLng>>(
                       MaterialPageRoute(
                         builder: (_) => MapPage(
                           initialPoints: field.vertices,
@@ -46,6 +46,14 @@ class FieldHistoryPage extends StatelessWidget {
                         ),
                       ),
                     );
+
+                    // 2. キャンセル or 不正ならそのまま
+                    if (result == null || result.length != 4) {
+                      return;
+                    }
+
+                    // 3. 呼び出し元（MapPage 新規）へ返す
+                    Navigator.of(context).pop(result);
                   },
                 ),
               );

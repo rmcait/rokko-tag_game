@@ -164,13 +164,22 @@ class _MapPageState extends State<MapPage> {
             top: 16,
             child: FloatingActionButton.small(
               heroTag: 'field_history',
-              onPressed: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => const FieldHistoryPage(),
-                  ),
-                );
-              },
+              onPressed: () async {
+              // 履歴画面を開いて、結果を待つ
+              final result = await Navigator.of(context).push<List<LatLng>>(
+                MaterialPageRoute(
+                  builder: (_) => const FieldHistoryPage(),
+                ),
+              );
+
+              // 履歴から何も返ってこなかったら何もしない
+              if (result == null || result.length != 4) {
+                return;
+              }
+
+              // ここで Home にバトンを返す
+              Navigator.of(context).pop(result);
+            },
               child: const Icon(Icons.history),
             ),
           ),
