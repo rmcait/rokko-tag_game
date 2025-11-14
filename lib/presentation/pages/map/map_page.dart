@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:tag_game/data/services/field_service.dart';
+import 'package:tag_game/presentation/pages/map/field_history_page.dart';
 
 class MapPage extends StatefulWidget {
   const MapPage({super.key});
@@ -143,6 +144,22 @@ class _MapPageState extends State<MapPage> {
             markers: _markers,
             polygons: _polygons,
           ),
+          // 履歴ボタン（マップ右上）
+          Positioned(
+            right: 16,
+            top: 16,
+            child: FloatingActionButton.small(
+              heroTag: 'field_history',
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => const FieldHistoryPage(),
+                  ),
+                );
+              },
+              child: const Icon(Icons.history),
+            ),
+          ),
           // ガイドカード
           Positioned(
             left: 16,
@@ -245,7 +262,7 @@ class _MapPageState extends State<MapPage> {
                 Expanded(
                   child: Text(
                     _points.isEmpty
-                        ? 'マップをタップしてフィールドの1点目を置きます'
+                        ? 'マップをタップして1点目を置いてください'
                         : 'マップ上をタップして残りの頂点を置いてください（${_points.length}/4）',
                     style: const TextStyle(fontSize: 13),
                   ),
@@ -254,7 +271,7 @@ class _MapPageState extends State<MapPage> {
             ),
             const SizedBox(height: 4),
             const Text(
-              '※ マーカーは長押ししてドラッグすると位置を微調整できます。',
+              '※ マーカーは長押しで位置を微調整できます。',
               style: TextStyle(fontSize: 11, color: Colors.grey),
             ),
             const SizedBox(height: 8),
@@ -270,7 +287,7 @@ class _MapPageState extends State<MapPage> {
                 ),
                 const Expanded(
                   child: Text(
-                    'このフィールドに名前をつけて保存する',
+                    '名前をつけて保存',
                     style: TextStyle(fontSize: 12),
                   ),
                 ),
