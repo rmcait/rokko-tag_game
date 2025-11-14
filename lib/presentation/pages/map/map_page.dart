@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:tag_game/data/services/field_service.dart';
 
 class MapPage extends StatefulWidget {
   const MapPage({super.key});
@@ -21,6 +22,9 @@ class _MapPageState extends State<MapPage> {
   /// マーカーとポリゴン
   final Set<Marker> _markers = {};
   final Set<Polygon> _polygons = {};
+
+  // 「名前をつけて保存するかどうか」のトグル
+  bool _saveAsTemplate = false;
 
   @override
   void initState() {
@@ -253,6 +257,25 @@ class _MapPageState extends State<MapPage> {
               '※ マーカーは長押ししてドラッグすると位置を微調整できます。',
               style: TextStyle(fontSize: 11, color: Colors.grey),
             ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Checkbox(
+                  value: _saveAsTemplate,
+                  onChanged: (v) {
+                    setState(() {
+                      _saveAsTemplate = v ?? false;
+                    });
+                  },
+                ),
+                const Expanded(
+                  child: Text(
+                    'このフィールドに名前をつけて保存する',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ),
+              ],
+            )
           ],
         ),
       ),
@@ -348,8 +371,63 @@ class _MapPageState extends State<MapPage> {
   }
 
   /// 確定：4点を前の画面へ返す
-  void _onConfirmPressed() {
+  Future<void> _onConfirmPressed() async {
     if (_points.length != 4) return;
-    Navigator.of(context).pop<List<LatLng>>(_points);
+
+    // 保存しない（一回限り）の場合
+    if (!_saveAsTemplate) {
+      Navigator.of(context).pop(_points);
+      return;
+    }
+
+    // 保存ありの場合：名前を聞く
+    final name = await _showFieldNameDialog();
+    if (name == null || name.isEmpty) {
+      return; // キャンセルされたら何もしない
+    }
+
+    // 共通コレクションに保存
+    await FieldService().createField(
+      name: name,
+      vertices: _points,
+    );
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('フィールド「$name」を保存しました')),
+    );
+
+    // 呼び出し元にも座標を返す
+    Navigator.of(context).pop(_points);
+  }
+
+  Future<String?> _showFieldNameDialog() {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('フィールド名を入力'),
+          content: TextField(
+            controller: controller,
+            decoration: const InputDecoration(
+              hintText: '例：六甲公園 北側エリア',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('キャンセル'),
+            ),
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(context, controller.text.trim());
+              },
+              child: const Text('保存'),
+            ),
+          ],
+        );
+      },
+    );
   }
 }

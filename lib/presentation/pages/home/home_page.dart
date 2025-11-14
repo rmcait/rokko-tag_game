@@ -8,7 +8,6 @@ import '../../routes.dart';
 import 'home_viewmodel.dart';
 
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:tag_game/data/services/field_service.dart';
 
 /// ホーム画面（ログイン後のメイン画面）
 class HomePage extends StatelessWidget {
@@ -147,14 +146,14 @@ class HomePage extends StatelessWidget {
                     final points = result;
 
                     // フィールド保存
-                    final fieldId = await FieldService().createField(
-                      vertices: points,
-                    );
+                    // final fieldId = await FieldService().createField(
+                    //   vertices: points,
+                    // );
 
                     if (!context.mounted) return;
 
                     ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('フィールドを作成しました（ID: $fieldId）')),
+                      SnackBar(content: Text('フィールドを設定しました')),
                     );
                   },
                 ),
