@@ -201,21 +201,31 @@ class _MapPageState extends State<MapPage> {
             child: FloatingActionButton.small(
               heroTag: 'field_history',
               onPressed: () async {
-              // 履歴画面を開いて、結果を待つ
-              final result = await Navigator.of(context).push<List<LatLng>>(
-                MaterialPageRoute(
-                  builder: (_) => const FieldHistoryPage(),
-                ),
-              );
+                final result = await Navigator.of(context).push<List<LatLng>>(
+                  MaterialPageRoute(
+                    builder: (_) => const FieldHistoryPage(),
+                  ),
+                );
 
-              // 履歴から何も返ってこなかったら何もしない
-              if (result == null || result.length != 4) {
-                return;
-              }
+                if (result == null || result.length != 4) {
+                  return;
+                }
 
-              // ここで Home にバトンを返す
-              Navigator.of(context).pop(result);
-            },
+                if (widget.roomCreation != null) {
+                  setState(() {
+                    _points
+                      ..clear()
+                      ..addAll(result);
+                    _rebuildMarkers();
+                    _updatePolygon();
+                  });
+                  _mapController?.animateCamera(
+                    CameraUpdate.newLatLngZoom(result.first, 16),
+                  );
+                } else {
+                  Navigator.of(context).pop(result);
+                }
+              },
               child: const Icon(Icons.history),
             ),
           ),
@@ -453,9 +463,6 @@ class _MapPageState extends State<MapPage> {
     if (_points.length != 4 || _isSubmitting) return;
 
     if (widget.isEditing) {
-      //デバック用
-      print('[EDIT] このフィールドでOK: $_points');
-
       Navigator.of(context).pop(_points);
       return;
       // もし将来的に「編集内容を上書き保存」したくなったら
@@ -463,6 +470,9 @@ class _MapPageState extends State<MapPage> {
     }
 
     if (widget.roomCreation != null) {
+      if (_saveAsTemplate) {
+        await _saveFieldTemplate(returnToPrevious: false);
+      }
       await _createPartyFromSelection(widget.roomCreation!);
       return;
     }
@@ -533,7 +543,7 @@ class _MapPageState extends State<MapPage> {
     }
   }
 
-  Future<void> _saveFieldTemplate() async {
+  Future<void> _saveFieldTemplate({bool returnToPrevious = true}) async {
     setState(() {
       _isSubmitting = true;
     });
@@ -553,7 +563,9 @@ class _MapPageState extends State<MapPage> {
         SnackBar(content: Text('フィールド「$name」を保存しました')),
       );
 
-      Navigator.of(context).pop(_points);
+      if (returnToPrevious) {
+        Navigator.of(context).pop(_points);
+      }
     } finally {
       if (mounted) {
         setState(() {
