@@ -1,17 +1,34 @@
 import 'package:flutter/material.dart';
-
-import '../../../core/utils/logger.dart';
-import '../../routes.dart';
-import '../../widgets/custom_button.dart';
 import 'package:provider/provider.dart';
-import '../../routes.dart';
-import 'home_viewmodel.dart';
 
-import 'package:google_maps_flutter/google_maps_flutter.dart';
+import '../../routes.dart';
+import '../map/map_page.dart';
+import 'home_viewmodel.dart';
 
 /// ホーム画面（ログイン後のメイン画面）
 class HomePage extends StatelessWidget {
   const HomePage({super.key});
+
+  Future<void> _startRoomCreation(BuildContext context) async {
+    final viewModel = context.read<HomeViewModel>();
+    final user = viewModel.currentUser;
+    if (user == null) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('ユーザー情報を取得できませんでした')),
+        );
+      }
+      return;
+    }
+
+    await Navigator.pushNamed(
+      context,
+      AppRoutes.map,
+      arguments: MapPageArgs(
+        roomCreation: RoomCreationParams(owner: user),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -105,12 +122,7 @@ class HomePage extends StatelessWidget {
                   icon: Icons.add_circle_outline,
                   title: 'ルームを作成',
                   subtitle: '新しいゲームルームを作成する',
-                  onTap: () {
-                    // TODO: ロビー作成画面へ遷移
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('ルーム作成機能は開発中です')),
-                    );
-                  },
+                  onTap: () => _startRoomCreation(context),
                 ),
                 const SizedBox(height: 12),
 
@@ -121,42 +133,6 @@ class HomePage extends StatelessWidget {
                   subtitle: '既存のゲームルームに参加する',
                   onTap: () {
                     Navigator.pushNamed(context, AppRoutes.joinRoom);
-                  },
-                ),
-                const SizedBox(height: 12),
-                
-                //いったん地図表示
-                _MenuButton(
-                  icon: Icons.map_outlined,
-                  title: '地図を開く',
-                  subtitle: '鬼ごっこのエリアを決める',
-                  onTap: () async {
-                  // MapPage を開いて、4点の戻り値を受け取る
-                    final result = await Navigator.pushNamed(
-                      context,
-                      AppRoutes.map,
-                    );
-
-                    // 戻ってきた値の型と中身をチェック
-                    if (result is! List<LatLng> || result.length != 4) {
-                      AppLogger.info("[デバッグ] フィールド未保存（トグルOFF）");
-                      AppLogger.info("points = $result");
-                      return;
-                    }
-
-                    //mapから所得したエリア情報が入る！！！！！！
-                    final points = result;
-                    //デバック用にターミナルにデータを表示;
-                    AppLogger.info(
-                      "points:\n" +
-                        points.map((p) => "・(${p.latitude}, ${p.longitude})").join("\n")
-                    );
-
-                    if (!context.mounted) return;
-
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('フィールドを設定しました')),
-                    );
                   },
                 ),
               ],

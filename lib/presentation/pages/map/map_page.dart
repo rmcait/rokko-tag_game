@@ -1,16 +1,48 @@
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:tag_game/data/models/firebase_user_model.dart';
 import 'package:tag_game/data/services/field_service.dart';
+import 'package:tag_game/data/services/party_service.dart';
 import 'package:tag_game/presentation/pages/map/field_history_page.dart';
+
+import '../room/room_lobby_page.dart';
+
+class MapPageArgs {
+  final List<LatLng>? initialPoints;
+  final bool isEditing;
+  final RoomCreationParams? roomCreation;
+
+  const MapPageArgs({
+    this.initialPoints,
+    this.isEditing = false,
+    this.roomCreation,
+  });
+}
+
+class RoomCreationParams {
+  final UserModel owner;
+  final int durationMinutes;
+  final String visibility;
+  final String? roomName;
+
+  const RoomCreationParams({
+    required this.owner,
+    this.durationMinutes = 15,
+    this.visibility = 'PRIVATE',
+    this.roomName,
+  });
+}
 
 class MapPage extends StatefulWidget {
   final List<LatLng>? initialPoints;
   final bool isEditing;
+  final RoomCreationParams? roomCreation;
   const MapPage({
     super.key,
     this.initialPoints,
     this.isEditing = false,
+    this.roomCreation,
   });
 
   @override
@@ -22,6 +54,7 @@ class _MapPageState extends State<MapPage> {
   LatLng? _currentLatLng;
   bool _isLoading = true;
   String? _errorMessage;
+  bool _isSubmitting = false;
 
   /// ユーザーがタップした頂点（最大4つ）
   final List<LatLng> _points = [];
@@ -32,6 +65,8 @@ class _MapPageState extends State<MapPage> {
 
   // 「名前をつけて保存するかどうか」のトグル
   bool _saveAsTemplate = false;
+
+  final PartyService _partyService = PartyService();
 
   @override
   void initState() {
@@ -111,7 +146,7 @@ class _MapPageState extends State<MapPage> {
   @override
   Widget build(BuildContext context) {
     final canConfirm =
-        !_isLoading && _errorMessage == null && _points.length == 4;
+        !_isLoading && _errorMessage == null && _points.length == 4 && !_isSubmitting;
 
     Widget body;
     if (_isLoading) {
@@ -414,42 +449,111 @@ class _MapPageState extends State<MapPage> {
 
   /// 確定：4点を前の画面へ返す
   Future<void> _onConfirmPressed() async {
-    if (_points.length != 4) return;
+    if (_points.length != 4 || _isSubmitting) return;
 
     if (widget.isEditing) {
-    //デバック用
-    print('[EDIT] このフィールドでOK: $_points');
+      //デバック用
+      print('[EDIT] このフィールドでOK: $_points');
 
-    Navigator.of(context).pop(_points);
-    return;
-    // もし将来的に「編集内容を上書き保存」したくなったら
-    // ここで FieldService().updateField(...) を呼べばOK
-  }
+      Navigator.of(context).pop(_points);
+      return;
+      // もし将来的に「編集内容を上書き保存」したくなったら
+      // ここで FieldService().updateField(...) を呼べばOK
+    }
+
+    if (widget.roomCreation != null) {
+      await _createPartyFromSelection(widget.roomCreation!);
+      return;
+    }
+
     // 保存しない（一回限り）の場合
     if (!_saveAsTemplate) {
       Navigator.of(context).pop(_points);
       return;
     }
 
-    // 保存ありの場合：名前を聞く
-    final name = await _showFieldNameDialog();
-    if (name == null || name.isEmpty) {
-      return; // キャンセルされたら何もしない
+    await _saveFieldTemplate();
+  }
+
+  Future<void> _createPartyFromSelection(RoomCreationParams params) async {
+    setState(() {
+      _isSubmitting = true;
+    });
+    try {
+      final result = await _partyService.createParty(
+        owner: params.owner,
+        polygon: List<LatLng>.from(_points),
+        durationMinutes: params.durationMinutes,
+        visibility: params.visibility,
+        name: params.roomName,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute<void>(
+          builder: (_) => RoomLobbyPage(
+            args: RoomLobbyPageArgs(
+              roomCode: result.inviteCode,
+              owner: RoomLobbyMember(
+                name: params.owner.displayName,
+                avatarUrl: params.owner.photoUrl,
+              ),
+            ),
+          ),
+        ),
+      );
+    } on PartyCodeGenerationException {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('パーティIDの生成に失敗しました。時間をおいて再度お試しください。'),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('ルームの作成に失敗しました: $e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+        });
+      }
     }
+  }
 
-    // 共通コレクションに保存
-    await FieldService().createField(
-      name: name,
-      vertices: _points,
-    );
+  Future<void> _saveFieldTemplate() async {
+    setState(() {
+      _isSubmitting = true;
+    });
+    try {
+      final name = await _showFieldNameDialog();
+      if (name == null || name.isEmpty) {
+        return;
+      }
 
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('フィールド「$name」を保存しました')),
-    );
+      await FieldService().createField(
+        name: name,
+        vertices: _points,
+      );
 
-    // 呼び出し元にも座標を返す
-    Navigator.of(context).pop(_points);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('フィールド「$name」を保存しました')),
+      );
+
+      Navigator.of(context).pop(_points);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+        });
+      }
+    }
   }
 
   Future<String?> _showFieldNameDialog() {

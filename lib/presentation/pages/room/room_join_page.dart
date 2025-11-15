@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../routes.dart';
+import 'room_lobby_page.dart';
+
 /// ルーム参加画面。6桁のパーティID入力UIを提供する。
 class RoomJoinPage extends StatefulWidget {
   const RoomJoinPage({super.key});
@@ -27,9 +30,17 @@ class _RoomJoinPageState extends State<RoomJoinPage> {
 
   void _handleJoin() {
     FocusScope.of(context).unfocus();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('パーティID ${_codeController.text} で参加します（未実装）'),
+    final roomCode = _codeController.text;
+
+    Navigator.pushNamed(
+      context,
+      AppRoutes.roomLobby,
+      arguments: RoomLobbyPageArgs(
+        roomCode: roomCode,
+        owner: const RoomLobbyMember(name: 'Owner'),
+        participants: const [
+          RoomLobbyMember(name: 'あなた'),
+        ],
       ),
     );
   }
