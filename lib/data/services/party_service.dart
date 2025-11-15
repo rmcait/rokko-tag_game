@@ -121,6 +121,8 @@ class PartyService {
       'userId': owner.uid,
       'role': 'OWNER',
       'ready': true,
+      'displayName': owner.displayName,
+      'avatarUrl': owner.photoUrl,
       'joinedAt': FieldValue.serverTimestamp(),
     });
 
