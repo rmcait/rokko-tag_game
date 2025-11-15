@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../routes.dart';
-import 'room_lobby_page.dart';
+import '../../../data/services/party_service.dart';
+import 'room_lobby_mapper.dart';
 
 /// ルーム参加画面。6桁のパーティID入力UIを提供する。
 class RoomJoinPage extends StatefulWidget {
@@ -15,6 +16,8 @@ class RoomJoinPage extends StatefulWidget {
 class _RoomJoinPageState extends State<RoomJoinPage> {
   static const int _roomCodeLength = 6;
   late final TextEditingController _codeController;
+  final PartyService _partyService = PartyService();
+  bool _isJoining = false;
 
   @override
   void initState() {
@@ -28,21 +31,52 @@ class _RoomJoinPageState extends State<RoomJoinPage> {
     super.dispose();
   }
 
-  void _handleJoin() {
+  Future<void> _handleJoin() async {
+    if (_isJoining) return;
     FocusScope.of(context).unfocus();
     final roomCode = _codeController.text;
 
-    Navigator.pushNamed(
-      context,
-      AppRoutes.roomLobby,
-      arguments: RoomLobbyPageArgs(
-        roomCode: roomCode,
-        owner: const RoomLobbyMember(name: 'Owner'),
-        participants: const [
-          RoomLobbyMember(name: 'あなた'),
-        ],
-      ),
-    );
+    setState(() {
+      _isJoining = true;
+    });
+
+    try {
+      final lobbyData =
+          await _partyService.fetchPartyLobbyByInviteCode(roomCode);
+
+      final resolvedLobby = lobbyData;
+
+      if (resolvedLobby == null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('該当するルームが見つかりませんでした')),
+        );
+        return;
+      }
+
+      final lobbyToShow = resolvedLobby.participants.isEmpty
+          ? _partyService.withMockParticipants(resolvedLobby)
+          : resolvedLobby;
+
+      if (!mounted) return;
+
+      Navigator.pushNamed(
+        context,
+        AppRoutes.roomLobby,
+        arguments: lobbyArgsFromPartyLobby(lobbyToShow),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('ルーム情報の取得に失敗しました: $e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isJoining = false;
+        });
+      }
+    }
   }
 
   @override
@@ -93,7 +127,8 @@ class _RoomJoinPageState extends State<RoomJoinPage> {
               ValueListenableBuilder<TextEditingValue>(
                 valueListenable: _codeController,
                 builder: (context, value, child) {
-                  final isCodeComplete = value.text.length == _roomCodeLength;
+                  final isCodeComplete =
+                      value.text.length == _roomCodeLength && !_isJoining;
                   return SizedBox(
                     width: double.infinity,
                     child: FilledButton(
@@ -105,13 +140,19 @@ class _RoomJoinPageState extends State<RoomJoinPage> {
                         foregroundColor: Theme.of(context).colorScheme.onPrimary,
                         disabledBackgroundColor: Theme.of(context).colorScheme.onSurface.withOpacity(0.12),
                       ),
-                      child: const Text(
-                        '参加',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
+                      child: _isJoining
+                          ? const SizedBox(
+                              height: 24,
+                              width: 24,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text(
+                              '参加',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                     ),
                   );
                 },

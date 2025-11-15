@@ -7,6 +7,7 @@ import 'package:tag_game/data/services/party_service.dart';
 import 'package:tag_game/presentation/pages/map/field_history_page.dart';
 
 import '../room/room_lobby_page.dart';
+import '../room/room_lobby_mapper.dart';
 
 class MapPageArgs {
   final List<LatLng>? initialPoints;
@@ -488,6 +489,18 @@ class _MapPageState extends State<MapPage> {
         name: params.roomName,
       );
 
+      PartyLobbyData lobbyData = (await _partyService
+              .fetchPartyLobbyByInviteCode(result.inviteCode)) ??
+          _partyService.localLobbyDataFromOwner(
+            owner: params.owner,
+            inviteCode: result.inviteCode,
+            partyId: result.partyId,
+          );
+
+      if (lobbyData.participants.isEmpty) {
+        lobbyData = _partyService.withMockParticipants(lobbyData);
+      }
+
       if (!mounted) {
         return;
       }
@@ -495,13 +508,7 @@ class _MapPageState extends State<MapPage> {
       Navigator.of(context).pushReplacement(
         MaterialPageRoute<void>(
           builder: (_) => RoomLobbyPage(
-            args: RoomLobbyPageArgs(
-              roomCode: result.inviteCode,
-              owner: RoomLobbyMember(
-                name: params.owner.displayName,
-                avatarUrl: params.owner.photoUrl,
-              ),
-            ),
+            args: lobbyArgsFromPartyLobby(lobbyData),
           ),
         ),
       );

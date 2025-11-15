@@ -22,18 +22,13 @@ class AppRouter {
           builder: (_) => const LoginPage(),
         );
       case AppRoutes.map:
-        final args = settings.arguments;
-        if (args is MapPageArgs) {
-          return MaterialPageRoute<void>(
-            builder: (_) => MapPage(
-              initialPoints: args.initialPoints,
-              isEditing: args.isEditing,
-              roomCreation: args.roomCreation,
-            ),
-          );
-        }
+        final args = settings.arguments as MapPageArgs?;
         return MaterialPageRoute<void>(
-          builder: (_) => const MapPage(),
+          builder: (_) => MapPage(
+            initialPoints: args?.initialPoints,
+            isEditing: args?.isEditing ?? false,
+            roomCreation: args?.roomCreation,
+          ),
         );
       case '/home':
         // Accept '/home' as an alias for the home route
