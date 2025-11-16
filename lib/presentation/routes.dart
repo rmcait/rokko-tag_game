@@ -54,6 +54,7 @@ class AppRouter {
                     role: PartyMemberRole.pending,
                   ),
                   participants: const [],
+                  durationMinutes: 15,
                 ),
                 currentUserId: 'owner',
               );

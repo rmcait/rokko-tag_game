@@ -507,6 +507,7 @@ class _MapPageState extends State<MapPage> {
                 owner: params.owner,
                 inviteCode: result.inviteCode,
                 partyId: result.partyId,
+                durationMinutes: params.durationMinutes,
               );
 
       if (AppConstants.seedLobbyWithMockMembers) {
@@ -536,6 +537,7 @@ class _MapPageState extends State<MapPage> {
               currentUserId: params.owner.uid,
               allowFieldReselect: true,
               deletePartyOnExit: true,
+              promptDurationSelection: true,
             ),
           ),
         ),

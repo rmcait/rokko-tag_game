@@ -8,12 +8,14 @@ class RoomLobbyPageArgs {
   final String currentUserId;
   final bool allowFieldReselect;
   final bool deletePartyOnExit;
+  final bool promptDurationSelection;
 
   const RoomLobbyPageArgs({
     required this.lobby,
     required this.currentUserId,
     this.allowFieldReselect = false,
     this.deletePartyOnExit = false,
+    this.promptDurationSelection = false,
   });
 }
 
@@ -31,6 +33,7 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
   bool _isAssigning = false;
   bool _isStartingGame = false;
   PartyLobbyData? _latestLobby;
+  bool _durationPromptScheduled = false;
 
   @override
   Widget build(BuildContext context) {
@@ -63,6 +66,7 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
                 );
               }
               _latestLobby = lobby;
+              _maybeShowDurationPrompt(lobby);
               final members = lobby.allMembers;
               final currentMember =
                   _findMemberById(members, widget.args.currentUserId);
@@ -89,6 +93,10 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
                   onStartGame: lobby.owner.userId == widget.args.currentUserId
                       ? () => _startGame(lobby)
                       : null,
+                  onEditDuration: (lobby.owner.userId == widget.args.currentUserId &&
+                          members.every((m) => m.role == PartyMemberRole.pending))
+                      ? () => _showDurationPicker(lobby)
+                      : null,
                 ),
               );
             },
@@ -112,15 +120,43 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
         lobby.owner.userId == widget.args.currentUserId;
   }
 
+  void _maybeShowDurationPrompt(PartyLobbyData lobby) {
+    if (_durationPromptScheduled) return;
+    if (!widget.args.promptDurationSelection) return;
+    if (lobby.owner.userId != widget.args.currentUserId) return;
+    final rolesAssigned =
+        lobby.allMembers.every((m) => m.role != PartyMemberRole.pending);
+    if (rolesAssigned) return;
+    _durationPromptScheduled = true;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _showDurationPicker(lobby);
+    });
+  }
+
+  Future<void> _showDurationPicker(PartyLobbyData lobby) async {
+    final selected = await showModalBottomSheet<int>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => _DurationPickerSheet(
+        initialValue: lobby.durationMinutes,
+      ),
+    );
+    if (selected != null) {
+      await _partyService.updatePartyDuration(lobby.partyId, selected);
+    }
+  }
+
   PartyMemberData? _findMemberById(
     List<PartyMemberData> members,
     String userId,
   ) {
-    try {
-      return members.firstWhere((m) => m.userId == userId);
-    } catch (_) {
-      return null;
+    for (final member in members) {
+      if (member.userId == userId) {
+        return member;
+      }
     }
+    return null;
   }
 
   Future<void> _handleAssignRoles(
@@ -222,6 +258,7 @@ class _LobbyLayout extends StatelessWidget {
   final VoidCallback? onViewRoles;
   final bool isStartingGame;
   final VoidCallback? onStartGame;
+  final VoidCallback? onEditDuration;
 
   const _LobbyLayout({
     required this.lobby,
@@ -235,6 +272,7 @@ class _LobbyLayout extends StatelessWidget {
     required this.onViewRoles,
     required this.isStartingGame,
     required this.onStartGame,
+    this.onEditDuration,
   });
 
   @override
@@ -364,6 +402,8 @@ class _LobbyLayout extends StatelessWidget {
         final header = _RoomCodeHeader(
           code: lobby.inviteCode,
           onCopy: onCopyCode,
+          durationMinutes: lobby.durationMinutes,
+          onEditDuration: onEditDuration,
         );
 
         if (constraints.maxHeight < 620) {
@@ -404,10 +444,14 @@ class _LobbyLayout extends StatelessWidget {
 class _RoomCodeHeader extends StatelessWidget {
   final String code;
   final VoidCallback onCopy;
+  final int durationMinutes;
+  final VoidCallback? onEditDuration;
 
   const _RoomCodeHeader({
     required this.code,
     required this.onCopy,
+    required this.durationMinutes,
+    this.onEditDuration,
   });
 
   @override
@@ -443,6 +487,23 @@ class _RoomCodeHeader extends StatelessWidget {
         TextButton(
           onPressed: onCopy,
           child: const Text('共有'),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              'ゲーム時間: ${durationMinutes}分',
+              style: theme.textTheme.bodyMedium,
+            ),
+            if (onEditDuration != null) ...[
+              const SizedBox(width: 12),
+              TextButton(
+                onPressed: onEditDuration,
+                child: const Text('変更'),
+              ),
+            ],
+          ],
         ),
       ],
     );
@@ -739,6 +800,59 @@ class RoleRevealSheet extends StatelessWidget {
                 ),
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DurationPickerSheet extends StatelessWidget {
+  final int initialValue;
+
+  const _DurationPickerSheet({required this.initialValue});
+
+  @override
+  Widget build(BuildContext context) {
+    final options = <int>[5, 10, 15];
+    return SafeArea(
+      child: DraggableScrollableSheet(
+        initialChildSize: 0.5,
+        minChildSize: 0.3,
+        maxChildSize: 0.8,
+        builder: (context, controller) => Container(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const SizedBox(height: 16),
+              Text(
+                'ゲーム時間を選択',
+                style: Theme.of(context).textTheme.titleMedium,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              Expanded(
+                child: ListView.builder(
+                  controller: controller,
+                  itemCount: options.length,
+                  itemBuilder: (context, index) {
+                    final minutes = options[index];
+                    return ListTile(
+                      title: Text('$minutes 分'),
+                      trailing: initialValue == minutes
+                          ? const Icon(Icons.check, color: Colors.green)
+                          : null,
+                      onTap: () => Navigator.of(context).pop(minutes),
+                    );
+                  },
+                ),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('キャンセル'),
+              ),
+            ],
           ),
         ),
       ),

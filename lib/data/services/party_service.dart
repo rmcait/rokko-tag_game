@@ -102,23 +102,27 @@ class PartyLobbyData {
   final String inviteCode;
   final PartyMemberData owner;
   final List<PartyMemberData> participants;
+  final int durationMinutes;
 
   const PartyLobbyData({
     required this.partyId,
     required this.inviteCode,
     required this.owner,
     required this.participants,
+    required this.durationMinutes,
   });
 
   PartyLobbyData copyWith({
     PartyMemberData? owner,
     List<PartyMemberData>? participants,
+    int? durationMinutes,
   }) {
     return PartyLobbyData(
       partyId: partyId,
       inviteCode: inviteCode,
       owner: owner ?? this.owner,
       participants: participants ?? this.participants,
+      durationMinutes: durationMinutes ?? this.durationMinutes,
     );
   }
 
@@ -278,31 +282,47 @@ class PartyService {
     final docRef = _parties.doc(partyId);
     final membersRef = docRef.collection('members');
     final snapshot = await membersRef.get();
-    final existingIds = snapshot.docs.map((doc) => doc.id).toSet();
+    final existingMembers = snapshot.docs.map(PartyMemberData.fromDoc).toList();
+    final mockDocs = snapshot.docs
+        .where((doc) => (doc.data()['isMock'] as bool?) ?? false)
+        .toList();
+    final mockCount = existingMembers.where((m) => m.isMock).length;
+    final realMembers = existingMembers.length - mockCount;
+
+    final availableSlots = (_capacityMax - realMembers).clamp(0, _capacityMax);
+    final targetMockCount = availableSlots == 0
+        ? 0
+        : desiredCount.clamp(0, availableSlots);
+    final currentMockCount = mockCount;
 
     final batch = _firestore.batch();
-    var added = 0;
-    for (final mock in generateMockParticipants(count: desiredCount)) {
-      if (existingIds.contains(mock.userId)) {
-        continue;
+    var hasChanges = false;
+    if (currentMockCount > targetMockCount) {
+      final excess = currentMockCount - targetMockCount;
+      for (var i = 0; i < excess && i < mockDocs.length; i++) {
+        batch.delete(mockDocs[i].reference);
+        hasChanges = true;
       }
-      if (added >= desiredCount) {
-        break;
+    } else if (currentMockCount < targetMockCount) {
+      final needed = targetMockCount - currentMockCount;
+      final mockSamples = generateMockParticipants(count: needed);
+      for (final mock in mockSamples) {
+        final docRef = membersRef.doc();
+        batch.set(docRef, {
+          'memberId': docRef.id,
+          'userId': docRef.id,
+          'role': PartyMemberRole.pending.code,
+          'ready': false,
+          'displayName': mock.name,
+          'avatarUrl': mock.avatarUrl,
+          'joinedAt': FieldValue.serverTimestamp(),
+          'isMock': true,
+        });
+        hasChanges = true;
       }
-      batch.set(membersRef.doc(mock.userId), {
-        'memberId': mock.userId,
-        'userId': mock.userId,
-        'role': PartyMemberRole.pending.code,
-        'ready': false,
-        'displayName': mock.name,
-        'avatarUrl': mock.avatarUrl,
-        'joinedAt': FieldValue.serverTimestamp(),
-        'isMock': true,
-      });
-      added++;
     }
 
-    if (added > 0) {
+    if (hasChanges) {
       await batch.commit();
     }
   }
@@ -368,6 +388,7 @@ class PartyService {
     required UserModel owner,
     required String inviteCode,
     String partyId = 'local_party',
+    int durationMinutes = 15,
   }) {
     return PartyLobbyData(
       partyId: partyId,
@@ -379,6 +400,7 @@ class PartyService {
         avatarUrl: owner.photoUrl,
       ),
       participants: const [],
+      durationMinutes: durationMinutes,
     );
   }
 
@@ -409,11 +431,13 @@ class PartyService {
     );
     final participants =
         members.where((m) => m.userId != ownerMember.userId).toList();
+    final duration = data['durationMinutes'] as int? ?? 15;
     return PartyLobbyData(
       partyId: partyDoc.id,
       inviteCode: data['inviteCode'] as String? ?? '------',
       owner: ownerMember,
       participants: participants,
+      durationMinutes: duration,
     );
   }
 
@@ -449,5 +473,12 @@ class PartyService {
     }
     batch.delete(docRef);
     await batch.commit();
+  }
+
+  Future<void> updatePartyDuration(String partyId, int minutes) async {
+    await _parties.doc(partyId).update({
+      'durationMinutes': minutes,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
   }
 }

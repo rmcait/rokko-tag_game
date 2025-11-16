@@ -6,11 +6,13 @@ RoomLobbyPageArgs lobbyArgsFromPartyLobby({
   required String currentUserId,
   bool allowFieldReselect = false,
   bool deletePartyOnExit = false,
+  bool promptDurationSelection = false,
 }) {
   return RoomLobbyPageArgs(
     lobby: data,
     currentUserId: currentUserId,
     allowFieldReselect: allowFieldReselect,
     deletePartyOnExit: deletePartyOnExit,
+    promptDurationSelection: promptDurationSelection,
   );
 }
