@@ -1,186 +1,470 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../../data/services/party_service.dart';
+
 class RoomLobbyPageArgs {
-  final String roomCode;
-  final RoomLobbyMember owner;
-  final List<RoomLobbyMember> participants;
+  final PartyLobbyData lobby;
+  final String currentUserId;
+  final bool allowFieldReselect;
+  final bool deletePartyOnExit;
 
   const RoomLobbyPageArgs({
-    required this.roomCode,
-    required this.owner,
-    this.participants = const [],
+    required this.lobby,
+    required this.currentUserId,
+    this.allowFieldReselect = false,
+    this.deletePartyOnExit = false,
   });
 }
 
-class RoomLobbyMember {
-  final String name;
-  final String? avatarUrl;
-
-  const RoomLobbyMember({
-    required this.name,
-    this.avatarUrl,
-  });
-}
-
-class RoomLobbyPage extends StatelessWidget {
+class RoomLobbyPage extends StatefulWidget {
   final RoomLobbyPageArgs args;
 
   const RoomLobbyPage({super.key, required this.args});
 
   @override
+  State<RoomLobbyPage> createState() => _RoomLobbyPageState();
+}
+
+class _RoomLobbyPageState extends State<RoomLobbyPage> {
+  final PartyService _partyService = PartyService();
+  bool _isAssigning = false;
+  bool _isStartingGame = false;
+  PartyLobbyData? _latestLobby;
+
+  @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('ルームロビー'),
-      ),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              const Text(
-                'パーティID',
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
+    return WillPopScope(
+      onWillPop: _handleWillPop,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('役割決め'),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () async {
+              final lobby = _latestLobby;
+              if (lobby != null && _shouldReturnToFieldSelection(lobby)) {
+                await _exitToFieldSelection(lobby);
+              } else {
+                Navigator.of(context).maybePop();
+              }
+            },
+          ),
+        ),
+        body: SafeArea(
+          child: StreamBuilder<PartyLobbyData?>(
+            stream: _partyService.watchPartyLobby(widget.args.lobby.partyId),
+            initialData: widget.args.lobby,
+            builder: (context, snapshot) {
+              final lobby = snapshot.data;
+              if (lobby == null) {
+                return const Center(
+                  child: Text('ルーム情報を取得できませんでした'),
+                );
+              }
+              _latestLobby = lobby;
+              final members = lobby.allMembers;
+              final currentMember =
+                  _findMemberById(members, widget.args.currentUserId);
+              return Padding(
+                padding: const EdgeInsets.all(24),
+                child: _LobbyLayout(
+                  lobby: lobby,
+                  members: members,
+                  currentMember: currentMember,
+                  isOwner: lobby.owner.userId == widget.args.currentUserId,
+                  isAssigning: _isAssigning,
+                  rolesAssigned: members.isNotEmpty &&
+                      members.every(
+                        (m) => m.role != PartyMemberRole.pending,
+                      ),
+                  onAssignRoles: currentMember == null
+                      ? null
+                      : () => _handleAssignRoles(lobby, currentMember),
+                  onViewRoles: currentMember == null
+                      ? null
+                      : () => _openRoleReveal(lobby, currentMember),
+                  onCopyCode: () => _copyRoomCode(lobby.inviteCode),
+                  isStartingGame: _isStartingGame,
+                  onStartGame: lobby.owner.userId == widget.args.currentUserId
+                      ? () => _startGame(lobby)
+                      : null,
                 ),
-              ),
-              const SizedBox(height: 16),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 32),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade200,
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Text(
-                  args.roomCode,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    fontSize: 40,
-                    letterSpacing: 8,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextButton.icon(
-                onPressed: () => _copyRoomCode(context),
-                icon: const Icon(Icons.share),
-                label: const Text('共有'),
-              ),
-              const SizedBox(height: 24),
-              Expanded(
-                child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Owner',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      _MemberTile(member: args.owner),
-                      const SizedBox(height: 24),
-                      const Text(
-                        '参加メンバー',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      if (args.participants.isEmpty)
-                        const Text(
-                          '参加者を待っています…',
-                          style: TextStyle(color: Colors.grey),
-                        )
-                      else
-                        ...args.participants
-                            .map((member) => Padding(
-                                  padding: const EdgeInsets.only(bottom: 12),
-                                  child: _MemberTile(member: member),
-                                ))
-                            .toList(),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 24),
-              Column(
-                children: [
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton(
-                      style: FilledButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        backgroundColor: Colors.amber.shade200,
-                        foregroundColor: Colors.black87,
-                      ),
-                      onPressed: () => _showPlaceholderAction(context, '役割決め'),
-                      child: const Text(
-                        '役割決め',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton(
-                      style: FilledButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        backgroundColor: Colors.grey.shade300,
-                        foregroundColor: Colors.black54,
-                      ),
-                      onPressed: () => _showPlaceholderAction(context, 'START'),
-                      child: const Text(
-                        'START',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
+              );
+            },
           ),
         ),
       ),
     );
   }
 
-  void _copyRoomCode(BuildContext context) {
-    Clipboard.setData(ClipboardData(text: args.roomCode));
+  Future<bool> _handleWillPop() async {
+    final lobby = _latestLobby;
+    if (lobby != null && _shouldReturnToFieldSelection(lobby)) {
+      await _exitToFieldSelection(lobby);
+      return false;
+    }
+    return true;
+  }
+
+  bool _shouldReturnToFieldSelection(PartyLobbyData lobby) {
+    return widget.args.allowFieldReselect &&
+        lobby.owner.userId == widget.args.currentUserId;
+  }
+
+  PartyMemberData? _findMemberById(
+    List<PartyMemberData> members,
+    String userId,
+  ) {
+    try {
+      return members.firstWhere((m) => m.userId == userId);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _handleAssignRoles(
+    PartyLobbyData lobby,
+    PartyMemberData currentMember,
+  ) async {
+    if (_isAssigning) return;
+    setState(() => _isAssigning = true);
+    try {
+      await _partyService.assignRolesRandomly(lobby.partyId);
+      final updated =
+          await _partyService.fetchPartyLobbyById(lobby.partyId) ?? lobby;
+      if (!mounted) return;
+      final refreshedMember = updated.allMembers.firstWhere(
+        (m) => m.userId == currentMember.userId,
+        orElse: () => currentMember,
+      );
+      await _openRoleReveal(updated, refreshedMember);
+    } on PartyJoinException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message)),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('役割決めに失敗しました: $e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isAssigning = false);
+      }
+    }
+  }
+
+  Future<void> _openRoleReveal(
+    PartyLobbyData lobby,
+    PartyMemberData currentMember,
+  ) async {
+    final data = lobby;
+    final me = currentMember;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => RoleRevealSheet(
+          lobby: data,
+          currentMember: me,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _startGame(PartyLobbyData lobby) async {
+    if (_isStartingGame) return;
+    setState(() => _isStartingGame = true);
+    try {
+      // TODO: Hook actual game start logic here.
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('ゲーム開始処理はまだ実装されていません')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isStartingGame = false);
+      }
+    }
+  }
+
+  void _copyRoomCode(String code) {
+    Clipboard.setData(ClipboardData(text: code));
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('パーティIDをコピーしました')),
     );
   }
 
-  void _showPlaceholderAction(BuildContext context, String label) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('$label はまだ実装されていません')),
+  Future<void> _exitToFieldSelection(PartyLobbyData lobby) async {
+    if (widget.args.deletePartyOnExit &&
+        lobby.owner.userId == widget.args.currentUserId) {
+      await _partyService.deleteParty(lobby.partyId);
+    }
+    if (!mounted) return;
+    Navigator.of(context).pop(
+      RoomLobbyExitResult(
+        partyDeleted: widget.args.deletePartyOnExit &&
+            lobby.owner.userId == widget.args.currentUserId,
+      ),
     );
   }
 }
 
-class _MemberTile extends StatelessWidget {
-  final RoomLobbyMember member;
+class _LobbyLayout extends StatelessWidget {
+  final PartyLobbyData lobby;
+  final List<PartyMemberData> members;
+  final PartyMemberData? currentMember;
+  final bool isOwner;
+  final bool isAssigning;
+  final VoidCallback? onAssignRoles;
+  final VoidCallback onCopyCode;
+  final bool rolesAssigned;
+  final VoidCallback? onViewRoles;
+  final bool isStartingGame;
+  final VoidCallback? onStartGame;
 
-  const _MemberTile({required this.member});
+  const _LobbyLayout({
+    required this.lobby,
+    required this.members,
+    required this.currentMember,
+    required this.isOwner,
+    required this.isAssigning,
+    required this.onAssignRoles,
+    required this.onCopyCode,
+    required this.rolesAssigned,
+    required this.onViewRoles,
+    required this.isStartingGame,
+    required this.onStartGame,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final resolvedMember =
+        currentMember ?? (members.isNotEmpty ? members.first : null);
+    final ownerMember = lobby.owner;
+    final participantTiles = lobby.participants
+        .map(
+          (member) => Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: _LobbyMemberTile(
+                  member: member,
+                  isCurrentUser: member.userId == currentMember?.userId,
+                  isOwner: false,
+                  showRole: rolesAssigned,
+                ),
+              ),
+        )
+        .toList();
+
+    Widget memberSection() {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Owner',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 12),
+          _LobbyMemberTile(
+            member: ownerMember,
+            isCurrentUser: ownerMember.userId == currentMember?.userId,
+            isOwner: true,
+            showRole: rolesAssigned,
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            '参加メンバー',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 12),
+          if (participantTiles.isEmpty)
+            const _EmptyMembersMessage()
+          else
+            ...participantTiles,
+        ],
+      );
+    }
+
+    Widget roleButton() {
+      final isReveal = rolesAssigned;
+      final bool isEnabled = isReveal
+          ? onViewRoles != null
+          : (isOwner && onAssignRoles != null && !isAssigning);
+      final Widget label = isReveal
+          ? const Text('役割を見る')
+          : isAssigning
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Text(isOwner ? '役割決め' : 'ホストが操作します');
+
+      final Color activeColor = const Color(0xFFFFE082);
+      final Color disabledColor = theme.colorScheme.surfaceVariant;
+
+      return SizedBox(
+        width: double.infinity,
+        child: FilledButton(
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            backgroundColor: isEnabled ? activeColor : disabledColor,
+            foregroundColor: Colors.black87,
+            disabledForegroundColor: Colors.black45,
+          ),
+          onPressed: isEnabled
+              ? (isReveal ? onViewRoles : onAssignRoles)
+              : null,
+          child: label,
+        ),
+      );
+    }
+
+    Widget startButton() {
+      final canStart =
+          rolesAssigned && onStartGame != null && !isStartingGame;
+      final Color activeColor = const Color(0xFFFFE082);
+      return SizedBox(
+        width: double.infinity,
+        child: FilledButton(
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            backgroundColor: canStart ? activeColor : Colors.grey.shade300,
+            foregroundColor: Colors.black87,
+          ),
+          onPressed: canStart ? onStartGame : null,
+          child: isStartingGame
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('START'),
+        ),
+      );
+    }
+
+    final buttons = Column(
+      children: [
+        if (resolvedMember != null) ...[
+          _RoleHeroPanel(
+            role: resolvedMember.role,
+          ),
+          const SizedBox(height: 24),
+        ],
+        roleButton(),
+        const SizedBox(height: 12),
+        startButton(),
+      ],
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final header = _RoomCodeHeader(
+          code: lobby.inviteCode,
+          onCopy: onCopyCode,
+        );
+
+        if (constraints.maxHeight < 620) {
+          return SingleChildScrollView(
+            padding: const EdgeInsets.only(bottom: 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                header,
+                const SizedBox(height: 24),
+                memberSection(),
+                const SizedBox(height: 24),
+                buttons,
+              ],
+            ),
+          );
+        }
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            header,
+            const SizedBox(height: 24),
+            Expanded(
+              child: SingleChildScrollView(
+                child: memberSection(),
+              ),
+            ),
+            const SizedBox(height: 24),
+            buttons,
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _RoomCodeHeader extends StatelessWidget {
+  final String code;
+  final VoidCallback onCopy;
+
+  const _RoomCodeHeader({
+    required this.code,
+    required this.onCopy,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'パーティID',
+          textAlign: TextAlign.center,
+          style: theme.textTheme.titleMedium?.copyWith(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          padding: const EdgeInsets.symmetric(vertical: 18),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceVariant,
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Text(
+            code,
+            textAlign: TextAlign.center,
+            style: theme.textTheme.displaySmall?.copyWith(
+              letterSpacing: 8,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextButton(
+          onPressed: onCopy,
+          child: const Text('共有'),
+        ),
+      ],
+    );
+  }
+}
+
+class _LobbyMemberTile extends StatelessWidget {
+  final PartyMemberData member;
+  final bool isCurrentUser;
+  final bool isOwner;
+  final bool showRole;
+
+  const _LobbyMemberTile({
+    required this.member,
+    required this.isCurrentUser,
+    required this.isOwner,
+    this.showRole = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Row(
       children: [
         CircleAvatar(
@@ -188,20 +472,282 @@ class _MemberTile extends StatelessWidget {
           backgroundImage:
               member.avatarUrl != null ? NetworkImage(member.avatarUrl!) : null,
           child: member.avatarUrl == null
-              ? const Icon(Icons.person, size: 24)
+              ? Text(member.name.isNotEmpty ? member.name[0] : '?')
               : null,
         ),
         const SizedBox(width: 16),
         Expanded(
-          child: Text(
-            member.name,
-            style: const TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w500,
-            ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                isCurrentUser ? '${member.name}（あなた）' : member.name,
+                style: theme.textTheme.titleMedium,
+                overflow: TextOverflow.ellipsis,
+              ),
+              if (showRole)
+                Text(
+                  member.role == PartyMemberRole.tagger ? 'おに' : '逃走',
+                  style: theme.textTheme.bodySmall,
+                ),
+            ],
           ),
         ),
+        if (isOwner)
+          Icon(
+            Icons.emoji_events,
+            size: 18,
+            color: Colors.amber.shade600,
+          ),
+        if (showRole) ...[
+          const SizedBox(width: 8),
+          _RoleChip(role: member.role),
+        ],
       ],
     );
   }
+}
+
+class _RoleChip extends StatelessWidget {
+  final PartyMemberRole role;
+
+  const _RoleChip({required this.role});
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = _RolePresentation.of(role);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: palette.accent.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        palette.chipLabel,
+        style: TextStyle(
+          color: palette.accent,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+}
+
+class _RoleHeroPanel extends StatelessWidget {
+  final PartyMemberRole role;
+
+  const _RoleHeroPanel({
+    required this.role,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = _RolePresentation.of(role);
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: palette.background,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'あなたの役割',
+            style: theme.textTheme.titleMedium?.copyWith(
+              color: palette.accent,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            palette.heroTitle,
+            style: theme.textTheme.headlineSmall?.copyWith(
+              color: palette.accent,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            palette.heroSubtitle,
+            style: theme.textTheme.bodySmall,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EmptyMembersMessage extends StatelessWidget {
+  const _EmptyMembersMessage();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Text(
+        '参加者を待っています…',
+        style: Theme.of(context).textTheme.bodyMedium,
+      ),
+    );
+  }
+}
+
+class _RolePresentation {
+  final Color accent;
+  final Color background;
+  final String heroTitle;
+  final String heroSubtitle;
+  final String chipLabel;
+  final IconData icon;
+
+  const _RolePresentation({
+    required this.accent,
+    required this.background,
+    required this.heroTitle,
+    required this.heroSubtitle,
+    required this.chipLabel,
+    required this.icon,
+  });
+
+  static _RolePresentation of(PartyMemberRole role) {
+    switch (role) {
+      case PartyMemberRole.tagger:
+        return _RolePresentation(
+          accent: const Color(0xFFE57373),
+          background: const Color(0xFFFFEBEE),
+          heroTitle: 'おに側',
+          heroSubtitle: '全員を捕まえて勝利を目指そう',
+          chipLabel: 'おに',
+          icon: Icons.local_fire_department,
+        );
+      case PartyMemberRole.runner:
+        return _RolePresentation(
+          accent: const Color(0xFF42A5F5),
+          background: const Color(0xFFE3F2FD),
+          heroTitle: '逃走側',
+          heroSubtitle: '仲間と協力して最後まで逃げ切ろう',
+          chipLabel: '逃走',
+          icon: Icons.directions_run,
+        );
+      case PartyMemberRole.pending:
+      default:
+        return _RolePresentation(
+          accent: Colors.grey,
+          background: Colors.grey.shade200,
+          heroTitle: '役割未決定',
+          heroSubtitle: 'ホストが「役割決め」を押すと結果が表示されます',
+          chipLabel: '待機中',
+          icon: Icons.hourglass_bottom,
+        );
+    }
+  }
+}
+
+class RoleRevealSheet extends StatelessWidget {
+  final PartyLobbyData lobby;
+  final PartyMemberData currentMember;
+
+  const RoleRevealSheet({
+    super.key,
+    required this.lobby,
+    required this.currentMember,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = _RolePresentation.of(currentMember.role);
+    final theme = Theme.of(context);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => Navigator.of(context).pop(),
+      child: Scaffold(
+        backgroundColor: palette.background,
+        body: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      '役割結果',
+                      style: theme.textTheme.titleLarge?.copyWith(
+                        color: palette.accent,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const Text('タップで戻る'),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                _RoleHeroPanel(role: currentMember.role),
+                const SizedBox(height: 24),
+                Expanded(
+                  child: Card(
+                    elevation: 0,
+                    color: Colors.white.withOpacity(0.85),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: ListView.separated(
+                        itemCount: lobby.allMembers.length,
+                        itemBuilder: (context, index) {
+                          final member = lobby.allMembers[index];
+                          final palette = _RolePresentation.of(member.role);
+                          final isCurrent =
+                              member.userId == currentMember.userId;
+                          return ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            leading: CircleAvatar(
+                              backgroundImage: member.avatarUrl != null
+                                  ? NetworkImage(member.avatarUrl!)
+                                  : null,
+                            ),
+                            title: Text(
+                              isCurrent
+                                  ? '${member.name}（あなた）'
+                                  : member.name,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            trailing: _RoleChip(role: member.role),
+                            subtitle: Text(
+                              palette.heroTitle,
+                              style: TextStyle(color: palette.accent),
+                            ),
+                          );
+                        },
+                        separatorBuilder: (_, __) =>
+                            const Divider(height: 24),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  '画面をタップするとロビーに戻ります。',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: Colors.black54,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class RoomLobbyExitResult {
+  final bool partyDeleted;
+
+  const RoomLobbyExitResult({this.partyDeleted = false});
 }

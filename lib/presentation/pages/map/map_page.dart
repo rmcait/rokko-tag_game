@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:tag_game/core/constants/app_constants.dart';
 import 'package:tag_game/data/models/firebase_user_model.dart';
 import 'package:tag_game/data/services/field_service.dart';
 import 'package:tag_game/data/services/party_service.dart';
@@ -68,6 +69,8 @@ class _MapPageState extends State<MapPage> {
   bool _saveAsTemplate = false;
 
   final PartyService _partyService = PartyService();
+  String? _createdPartyId;
+  bool _shouldDeleteCreatedParty = false;
 
   @override
   void initState() {
@@ -140,8 +143,17 @@ class _MapPageState extends State<MapPage> {
 
   @override
   void dispose() {
+    _cleanupCreatedParty();
     _mapController?.dispose();
     super.dispose();
+  }
+
+  void _cleanupCreatedParty() {
+    final partyId = _createdPartyId;
+    if (partyId != null && _shouldDeleteCreatedParty) {
+      _partyService.deleteParty(partyId);
+      _createdPartyId = null;
+    }
   }
 
   @override
@@ -489,29 +501,50 @@ class _MapPageState extends State<MapPage> {
         name: params.roomName,
       );
 
-      PartyLobbyData lobbyData = (await _partyService
-              .fetchPartyLobbyByInviteCode(result.inviteCode)) ??
-          _partyService.localLobbyDataFromOwner(
-            owner: params.owner,
-            inviteCode: result.inviteCode,
-            partyId: result.partyId,
-          );
+      PartyLobbyData lobbyData =
+          (await _partyService.fetchPartyLobbyByInviteCode(result.inviteCode)) ??
+              _partyService.localLobbyDataFromOwner(
+                owner: params.owner,
+                inviteCode: result.inviteCode,
+                partyId: result.partyId,
+              );
 
-      if (lobbyData.participants.isEmpty) {
-        lobbyData = _partyService.withMockParticipants(lobbyData);
+      if (AppConstants.seedLobbyWithMockMembers) {
+        await _partyService.ensureMockMembers(
+          lobbyData.partyId,
+          desiredCount: AppConstants.lobbyMockMemberCount,
+        );
+        final refreshed =
+            await _partyService.fetchPartyLobbyByInviteCode(result.inviteCode);
+        if (refreshed != null) {
+          lobbyData = refreshed;
+        }
       }
 
       if (!mounted) {
         return;
       }
 
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute<void>(
+      _createdPartyId = result.partyId;
+      _shouldDeleteCreatedParty = true;
+
+      final exitResult = await Navigator.of(context).push<RoomLobbyExitResult>(
+        MaterialPageRoute<RoomLobbyExitResult>(
           builder: (_) => RoomLobbyPage(
-            args: lobbyArgsFromPartyLobby(lobbyData),
+            args: lobbyArgsFromPartyLobby(
+              data: lobbyData,
+              currentUserId: params.owner.uid,
+              allowFieldReselect: true,
+              deletePartyOnExit: true,
+            ),
           ),
         ),
       );
+
+      if (exitResult?.partyDeleted == true) {
+        _createdPartyId = null;
+        _shouldDeleteCreatedParty = false;
+      }
     } on PartyCodeGenerationException {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../data/services/party_service.dart';
 import 'pages/home/home_page.dart';
 import 'pages/login/login_page.dart';
 import 'pages/map/map_page.dart';
@@ -43,9 +44,18 @@ class AppRouter {
         final args = settings.arguments;
         final roomArgs = args is RoomLobbyPageArgs
             ? args
-            : const RoomLobbyPageArgs(
-                roomCode: '------',
-                owner: RoomLobbyMember(name: 'Owner'),
+            : RoomLobbyPageArgs(
+                lobby: PartyLobbyData(
+                  partyId: 'local',
+                  inviteCode: '------',
+                  owner: const PartyMemberData(
+                    userId: 'owner',
+                    name: 'Owner',
+                    role: PartyMemberRole.pending,
+                  ),
+                  participants: const [],
+                ),
+                currentUserId: 'owner',
               );
         return MaterialPageRoute<void>(
           builder: (_) => RoomLobbyPage(args: roomArgs),
