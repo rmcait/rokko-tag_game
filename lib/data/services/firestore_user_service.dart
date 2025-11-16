@@ -39,7 +39,7 @@ class FirestoreUserService {
       'displayName': authUser.displayName,
       'email': authUser.email,
       'avatarUrl': authUser.photoUrl,
-      'status': UserStatus.ACTIVE.name,
+      'status': UserStatus.active.code,
       'updatedAt': FieldValue.serverTimestamp(),
     };
 

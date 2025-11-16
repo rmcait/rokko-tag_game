@@ -22,7 +22,7 @@ class UserModel {
       googleUid: data['googleUid'] as String? ?? '',
       displayName: data['displayName'] as String? ?? '',
       avatarUrl: data['avatarUrl'] as String? ?? '',
-      status: data['status'] as String? ?? UserStatus.UNKNOWN.name,
+      status: data['status'] as String? ?? UserStatus.unknown.code,
       fcmToken: data['fcmToken'] as String? ?? '',
       createdAt: _parseTimestamp(data['createdAt']),
       updatedAt: _parseTimestamp(data['updatedAt']),
