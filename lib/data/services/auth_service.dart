@@ -51,9 +51,7 @@ class AuthService {
 
       // UserModelを返す
       if (userCredential.user != null) {
-        final userModel = UserModel.fromFirebaseUser(userCredential.user!);
-        await _userService.syncFromAuthUser(userModel);
-        return userModel;
+        return _syncAndReturnUser(userCredential.user!);
       }
 
       return null;
@@ -69,9 +67,7 @@ class AuthService {
       final UserCredential userCredential = await _auth.signInAnonymously();
 
       if (userCredential.user != null) {
-        final userModel = UserModel.fromFirebaseUser(userCredential.user!);
-        await _userService.syncFromAuthUser(userModel);
-        return userModel;
+        return _syncAndReturnUser(userCredential.user!);
       }
 
       return null;
@@ -92,5 +88,11 @@ class AuthService {
       debugPrint('サインアウトエラー: $e');
       rethrow;
     }
+  }
+
+  Future<UserModel> _syncAndReturnUser(User firebaseUser) async {
+    final userModel = UserModel.fromFirebaseUser(firebaseUser);
+    await _userService.syncFromAuthUser(userModel);
+    return userModel;
   }
 }

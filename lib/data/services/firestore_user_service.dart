@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../models/firebase_user_model.dart' as auth_model;
 import '../models/firestore_user_model.dart';
+import '../models/user_status.dart';
 
 class FirestoreUserService {
   FirestoreUserService({FirebaseFirestore? firestore})
@@ -38,7 +39,7 @@ class FirestoreUserService {
       'displayName': authUser.displayName,
       'email': authUser.email,
       'avatarUrl': authUser.photoUrl,
-      'status': 'ACTIVE',
+      'status': UserStatus.ACTIVE.name,
       'updatedAt': FieldValue.serverTimestamp(),
     };
 
