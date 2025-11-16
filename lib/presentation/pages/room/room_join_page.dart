@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
 
-import '../../routes.dart';
+import '../../../core/constants/app_constants.dart';
+import '../../../data/services/auth_service.dart';
 import '../../../data/services/party_service.dart';
+import '../../routes.dart';
 import 'room_lobby_mapper.dart';
 
 /// ルーム参加画面。6桁のパーティID入力UIを提供する。
@@ -17,6 +20,7 @@ class _RoomJoinPageState extends State<RoomJoinPage> {
   static const int _roomCodeLength = 6;
   late final TextEditingController _codeController;
   final PartyService _partyService = PartyService();
+  late AuthService _authService;
   bool _isJoining = false;
 
   @override
@@ -31,22 +35,38 @@ class _RoomJoinPageState extends State<RoomJoinPage> {
     super.dispose();
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _authService = context.read<AuthService>();
+  }
+
   Future<void> _handleJoin() async {
     if (_isJoining) return;
     FocusScope.of(context).unfocus();
     final roomCode = _codeController.text;
+
+    final user = _authService.currentUserModel;
+    if (user == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('ユーザー情報を取得できませんでした')),
+      );
+      return;
+    }
 
     setState(() {
       _isJoining = true;
     });
 
     try {
-      final lobbyData =
-          await _partyService.fetchPartyLobbyByInviteCode(roomCode);
+      final lobbyData = await _partyService.joinPartyByInviteCode(
+        inviteCode: roomCode,
+        user: user,
+        seedMockMembersIfNeeded: AppConstants.seedLobbyWithMockMembers,
+        desiredMockCount: AppConstants.lobbyMockMemberCount,
+      );
 
-      final resolvedLobby = lobbyData;
-
-      if (resolvedLobby == null) {
+      if (lobbyData == null) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('該当するルームが見つかりませんでした')),
@@ -54,16 +74,20 @@ class _RoomJoinPageState extends State<RoomJoinPage> {
         return;
       }
 
-      final lobbyToShow = resolvedLobby.participants.isEmpty
-          ? _partyService.withMockParticipants(resolvedLobby)
-          : resolvedLobby;
-
       if (!mounted) return;
 
       Navigator.pushNamed(
         context,
         AppRoutes.roomLobby,
-        arguments: lobbyArgsFromPartyLobby(lobbyToShow),
+        arguments: lobbyArgsFromPartyLobby(
+          data: lobbyData,
+          currentUserId: user.uid,
+        ),
+      );
+    } on PartyJoinException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message)),
       );
     } catch (e) {
       if (!mounted) return;

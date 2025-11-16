@@ -1,20 +1,18 @@
 import '../../../data/services/party_service.dart';
 import 'room_lobby_page.dart';
 
-RoomLobbyPageArgs lobbyArgsFromPartyLobby(PartyLobbyData data) {
+RoomLobbyPageArgs lobbyArgsFromPartyLobby({
+  required PartyLobbyData data,
+  required String currentUserId,
+  bool allowFieldReselect = false,
+  bool deletePartyOnExit = false,
+  bool promptDurationSelection = false,
+}) {
   return RoomLobbyPageArgs(
-    roomCode: data.inviteCode,
-    owner: RoomLobbyMember(
-      name: data.owner.name,
-      avatarUrl: data.owner.avatarUrl,
-    ),
-    participants: data.participants
-        .map(
-          (member) => RoomLobbyMember(
-            name: member.name,
-            avatarUrl: member.avatarUrl,
-          ),
-        )
-        .toList(),
+    lobby: data,
+    currentUserId: currentUserId,
+    allowFieldReselect: allowFieldReselect,
+    deletePartyOnExit: deletePartyOnExit,
+    promptDurationSelection: promptDurationSelection,
   );
 }
