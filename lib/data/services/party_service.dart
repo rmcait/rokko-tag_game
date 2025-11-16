@@ -121,6 +121,8 @@ class PartyService {
       'userId': owner.uid,
       'role': 'OWNER',
       'ready': true,
+      'displayName': owner.displayName,
+      'avatarUrl': owner.photoUrl,
       'joinedAt': FieldValue.serverTimestamp(),
     });
 
@@ -202,7 +204,7 @@ class PartyService {
   /// モック参加者のみを付与するユーティリティ。
   PartyLobbyData withMockParticipants(
     PartyLobbyData lobby, {
-    int count = 4,
+    int count = 3,
   }) {
     return lobby.copyWith(
       participants: generateMockParticipants(count: count),

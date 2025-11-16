@@ -2,12 +2,14 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import '../models/firebase_user_model.dart';
+import 'firestore_user_service.dart';
 
 /// 認証サービス
 /// Firebase AuthとGoogle Sign-Inを管理
 class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final GoogleSignIn _googleSignIn = GoogleSignIn();
+  final FirestoreUserService _userService = FirestoreUserService();
 
   /// 現在のユーザーを取得
   User? get currentUser => _auth.currentUser;
@@ -49,7 +51,7 @@ class AuthService {
 
       // UserModelを返す
       if (userCredential.user != null) {
-        return UserModel.fromFirebaseUser(userCredential.user!);
+        return _syncAndReturnUser(userCredential.user!);
       }
 
       return null;
@@ -65,7 +67,7 @@ class AuthService {
       final UserCredential userCredential = await _auth.signInAnonymously();
 
       if (userCredential.user != null) {
-        return UserModel.fromFirebaseUser(userCredential.user!);
+        return _syncAndReturnUser(userCredential.user!);
       }
 
       return null;
@@ -86,5 +88,11 @@ class AuthService {
       debugPrint('サインアウトエラー: $e');
       rethrow;
     }
+  }
+
+  Future<UserModel> _syncAndReturnUser(User firebaseUser) async {
+    final userModel = UserModel.fromFirebaseUser(firebaseUser);
+    await _userService.syncFromAuthUser(userModel);
+    return userModel;
   }
 }

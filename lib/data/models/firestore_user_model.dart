@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../../domain/entities.dart';
+import 'user_status.dart';
 
 class UserModel {
   const UserModel({
@@ -21,7 +22,7 @@ class UserModel {
       googleUid: data['googleUid'] as String? ?? '',
       displayName: data['displayName'] as String? ?? '',
       avatarUrl: data['avatarUrl'] as String? ?? '',
-      status: data['status'] as String? ?? 'UNKNOWN',
+      status: data['status'] as String? ?? UserStatus.unknown.code,
       fcmToken: data['fcmToken'] as String? ?? '',
       createdAt: _parseTimestamp(data['createdAt']),
       updatedAt: _parseTimestamp(data['updatedAt']),
