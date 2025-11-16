@@ -90,6 +90,7 @@
 | `spawnedAt` | timestamp | Y | |
 | `pickedBy` | string | N | `playerId` |
 | `state` | string | Y | `AVAILABLE`, `PICKED`, `USED`, `EXPIRED` |
+アイテムは3つ全て出して、逃走者1人が保持できるのは2つまで
 
 ### 2.4 `gameSessions/{gameId}/events`
 時系列ログ。クエリ最適化のため `createdAt` 降順インデックス。
