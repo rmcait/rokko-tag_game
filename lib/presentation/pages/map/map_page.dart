@@ -5,6 +5,7 @@ import 'package:tag_game/data/models/firebase_user_model.dart';
 import 'package:tag_game/data/services/field_service.dart';
 import 'package:tag_game/data/services/party_service.dart';
 import 'package:tag_game/presentation/pages/map/field_history_page.dart';
+import 'package:turf/turf.dart' as turf;
 
 import '../room/room_lobby_page.dart';
 import '../room/room_lobby_mapper.dart';
@@ -254,6 +255,13 @@ class _MapPageState extends State<MapPage> {
                   onPressed: _onZoomOut,
                   child: const Icon(Icons.remove),
                 ),
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                  heroTag: 'check_position',
+                  onPressed: _checkAreaStatus,
+                  tooltip: 'エリア内判定',
+                  child: const Icon(Icons.location_searching),
+                ),
               ],
             ),
           ),
@@ -456,6 +464,58 @@ class _MapPageState extends State<MapPage> {
   /// ズームアウト
   void _onZoomOut() {
     _mapController?.animateCamera(CameraUpdate.zoomOut());
+  }
+
+  Future<void> _checkAreaStatus() async {
+    if (_points.length < 3) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('フィールドが未設定です。先に頂点を指定してください。')),
+      );
+      return;
+    }
+
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+      final current = LatLng(position.latitude, position.longitude);
+      final inside = _isPointInsideField(current);
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(inside ? '現在地はエリア内です' : '現在地はエリア外です'),
+          backgroundColor: inside ? Colors.green : Colors.red,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('現在地の取得に失敗しました: $e')),
+      );
+    }
+  }
+
+  bool _isPointInsideField(LatLng point) {
+    if (_points.length < 3) return false;
+
+    final List<turf.Position> ring = _points
+        .map<turf.Position>(
+          (p) => turf.Position(p.longitude, p.latitude),
+        )
+        .toList();
+
+    ring.add(
+      turf.Position(_points.first.longitude, _points.first.latitude),
+    );
+
+    final polygon = turf.Polygon(coordinates: [ring]);
+
+    final turf.Position pt =
+        turf.Position(point.longitude, point.latitude);
+
+    return turf.booleanPointInPolygon(pt, polygon);
   }
 
   /// 確定：4点を前の画面へ返す
