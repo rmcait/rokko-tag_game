@@ -34,7 +34,7 @@ devices:
 run-ios:
 	fvm flutter emulators --launch apple_ios_simulator
 	sleep 7
-	fvm flutter run -d "iPhone 16e"
+	fvm flutter run -d "iPhone 17 Pro"
 
 # Androidエミュレータ
 run-android:
