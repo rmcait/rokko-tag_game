@@ -93,9 +93,7 @@ class _MapPageState extends State<MapPage> {
   @override
   void initState() {
     super.initState();
-    _loadCurrentLocation().then((_) {
-    _startLocationWatch();  // ← 位置情報の継続監視を開始
-  });
+    _loadCurrentLocation(); // ← これだけでOK
 
     if (widget.initialPoints != null) {
       _points.addAll(widget.initialPoints!);
@@ -152,42 +150,7 @@ class _MapPageState extends State<MapPage> {
     }
   }
 
-  void _startLocationWatch() {
-  _posSub = Geolocator.getPositionStream(
-    locationSettings: const LocationSettings(
-      accuracy: LocationAccuracy.high,
-      distanceFilter: 5, // 5mごとに更新
-    ),
-  ).listen((pos) async {
-    final current = LatLng(pos.latitude, pos.longitude);
-
-    // Turfでエリア内外判定
-    final inside = _points.length >= 3 ? _isPointInsideField(current) : false;
-
-    setState(() {
-      _isInside = inside;
-      _userMarker = Marker(
-        markerId: const MarkerId('user'),
-        position: current,
-        zIndex: 10,
-        icon: BitmapDescriptor.defaultMarkerWithHue(
-          inside ? BitmapDescriptor.hueAzure : BitmapDescriptor.hueRed,
-        ),
-      );
-    });
-
-    // ★ ゲーム中なら位置をFirestoreへ同期
-    if (widget.gameId != null && widget.playerId != null) {
-      await GameService().updatePlayerLocation(
-        gameId: widget.gameId!,
-        playerId: widget.playerId!,
-        lat: pos.latitude,
-        lng: pos.longitude,
-        inside: inside,
-      );
-    }
-  });
-}
+  
   void _onMapCreated(GoogleMapController controller) {
     _mapController = controller;
     if (_currentLatLng != null) {

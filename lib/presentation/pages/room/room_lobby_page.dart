@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../data/services/party_service.dart';
+import 'package:tag_game/presentation/pages/map/map_page.dart';
+import 'package:tag_game/presentation/pages/map/game_map_page.dart';
 
 class RoomLobbyPageArgs {
   final PartyLobbyData lobby;
@@ -209,20 +211,32 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
   }
 
   Future<void> _startGame(PartyLobbyData lobby) async {
-    if (_isStartingGame) return;
-    setState(() => _isStartingGame = true);
-    try {
-      // TODO: Hook actual game start logic here.
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('ゲーム開始処理はまだ実装されていません')),
-      );
-    } finally {
-      if (mounted) {
-        setState(() => _isStartingGame = false);
-      }
+  if (_isStartingGame) return;
+  setState(() => _isStartingGame = true);
+
+  try {
+    // ★ デバッグ用 gameId（とりあえずパーティIDと紐づけ）
+    final gameId = 'debug_${lobby.partyId}';
+
+    // ★ 今のユーザーIDをそのまま playerId として渡す
+    final playerId = widget.args.currentUserId;
+
+    if (!mounted) return;
+
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => GameMapPage(
+          gameId: gameId,
+          playerId: playerId,
+        ),
+      ),
+    );
+  } finally {
+    if (mounted) {
+      setState(() => _isStartingGame = false);
     }
   }
+}
 
   void _copyRoomCode(String code) {
     Clipboard.setData(ClipboardData(text: code));

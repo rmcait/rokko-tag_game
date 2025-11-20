@@ -23,7 +23,7 @@ class GameService {
     await ref.set(
       {
         'lastLocation': GeoPoint(lat, lng),
-        'inside': inside,
+        'insideField': inside,
         'lastUpdateAt': FieldValue.serverTimestamp(),
       },
       SetOptions(merge: true),
