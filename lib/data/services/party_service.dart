@@ -104,27 +104,37 @@ class PartyLobbyData {
   final List<PartyMemberData> participants;
   final int durationMinutes;
 
+  final String status;
+  final String? activeGameId;
+
   const PartyLobbyData({
     required this.partyId,
     required this.inviteCode,
     required this.owner,
     required this.participants,
     required this.durationMinutes,
+    this.status = 'WAITING',
+    this.activeGameId, 
   });
+  // いらないらしい。なんでかは不明。
+  // factory PartyLobbyData.fromFirestore(
+  //   DocumentSnapshot<Map<String, dynamic>> doc,
+  // ) {
+  //   final data = doc.data()!;
+  //   final members = <PartyMemberData>[];
 
-  PartyLobbyData copyWith({
-    PartyMemberData? owner,
-    List<PartyMemberData>? participants,
-    int? durationMinutes,
-  }) {
-    return PartyLobbyData(
-      partyId: partyId,
-      inviteCode: inviteCode,
-      owner: owner ?? this.owner,
-      participants: participants ?? this.participants,
-      durationMinutes: durationMinutes ?? this.durationMinutes,
-    );
-  }
+  //   return PartyLobbyData(
+  //     partyId: doc.id,
+  //     inviteCode: data['inviteCode'],
+  //     owner: members.first,
+  //     participants: members.skip(1).toList(),
+  //     durationMinutes: data['durationMinutes'] ?? 15,
+
+  //     /// ★ 追加
+  //     status: data['status'] ?? 'WAITING',
+  //     activeGameId: data['activeGameId'],
+  //   );
+  // }
 
   int get memberCount => 1 + participants.length;
 
@@ -438,6 +448,8 @@ class PartyService {
       owner: ownerMember,
       participants: participants,
       durationMinutes: duration,
+      status: (data['status'] as String?) ?? 'WAITING',
+      activeGameId: data['activeGameId'] as String?,
     );
   }
 

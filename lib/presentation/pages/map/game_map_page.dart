@@ -166,11 +166,14 @@ class _GameMapPageState extends State<GameMapPage> {
         final inside = (data['inside'] as bool?) ?? false;
         final isMe = doc.id == widget.playerId;
 
-        final hue = isMe
-            ? BitmapDescriptor.hueAzure // 自分は青
-            : (inside
-                ? BitmapDescriptor.hueGreen // エリア内の他人は緑
-                : BitmapDescriptor.hueOrange); // エリア外の他人はオレンジ
+        if (isMe) {
+        continue;
+        }
+
+        // 他プレイヤー用の色分け
+      final hue = inside
+          ? BitmapDescriptor.hueGreen   // エリア内の他プレイヤー
+          : BitmapDescriptor.hueOrange; // エリア外の他プレイヤー
 
         markers.add(
           Marker(

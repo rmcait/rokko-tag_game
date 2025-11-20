@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../../data/services/party_service.dart';
 import 'package:tag_game/presentation/pages/map/map_page.dart';
 import 'package:tag_game/presentation/pages/map/game_map_page.dart';
@@ -37,6 +37,8 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
   PartyLobbyData? _latestLobby;
   bool _durationPromptScheduled = false;
 
+  bool _navigatedToGame = false;
+
   @override
   Widget build(BuildContext context) {
     return WillPopScope(
@@ -69,6 +71,7 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
               }
               _latestLobby = lobby;
               _maybeShowDurationPrompt(lobby);
+              _maybeNavigateToGame(lobby);
               final members = lobby.allMembers;
               final currentMember =
                   _findMemberById(members, widget.args.currentUserId);
@@ -215,21 +218,43 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
   setState(() => _isStartingGame = true);
 
   try {
-    // ★ デバッグ用 gameId（とりあえずパーティIDと紐づけ）
-    final gameId = 'debug_${lobby.partyId}';
+    // ★ 1. 共通で使う gameId を決める（とりあえず partyId ベースでOK）
+    final gameId = 'game_${lobby.partyId}';
 
-    // ★ 今のユーザーIDをそのまま playerId として渡す
-    final playerId = widget.args.currentUserId;
+    // ★ 2. gameSessions にゲームセッションを作成
+    await FirebaseFirestore.instance
+        .collection('gameSessions')
+        .doc(gameId)
+        .set({
+      'partyId': lobby.partyId,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
 
-    if (!mounted) return;
+    // ★ 3. parties/{partyId} にゲーム開始フラグ＆gameId を保存
+    await FirebaseFirestore.instance
+        .collection('parties')
+        .doc(lobby.partyId)
+        .update({
+      'status': 'PLAYING',      // もともと "WAITING" になってたやつ
+      'activeGameId': gameId,   // 新しく追加するフィールド
+    });
 
-    await Navigator.of(context).push(
+    // ★ 4. ホスト自身もすぐゲーム画面へ
+    final me = _findMemberById(lobby.allMembers, widget.args.currentUserId);
+    if (!mounted || me == null) return;
+
+    await Navigator.of(context).pushReplacement(
       MaterialPageRoute(
         builder: (_) => GameMapPage(
           gameId: gameId,
-          playerId: playerId,
+          playerId: me.userId,
         ),
       ),
+    );
+  } catch (e) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('ゲーム開始に失敗しました: $e')),
     );
   } finally {
     if (mounted) {
@@ -237,7 +262,36 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
     }
   }
 }
+void _maybeNavigateToGame(PartyLobbyData lobby) {
+  // すでに遷移していたら何もしない
+  if (_navigatedToGame) return;
 
+  // Firestore 上の status が PLAYING でなければまだ待機
+  if (lobby.status != 'PLAYING') return;
+
+  // activeGameId が入っていないとダメ
+  final gameId = lobby.activeGameId;
+  if (gameId == null || gameId.isEmpty) return;
+
+  // 自分の PartyMember を探す
+  final me = _findMemberById(lobby.allMembers, widget.args.currentUserId);
+  if (me == null) return;
+
+  _navigatedToGame = true;
+
+  // ビルド中なのでフレーム終了後にナビゲーション
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => GameMapPage(
+          gameId: gameId,
+          playerId: me.userId,
+        ),
+      ),
+    );
+  });
+}
   void _copyRoomCode(String code) {
     Clipboard.setData(ClipboardData(text: code));
     ScaffoldMessenger.of(context).showSnackBar(
