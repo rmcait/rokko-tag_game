@@ -5,6 +5,7 @@ import 'pages/home/home_page.dart';
 import 'pages/login/login_page.dart';
 import 'pages/map/map_page.dart';
 import 'pages/room/room_join_page.dart';
+import 'pages/room/room_game_page.dart';
 import 'pages/room/room_lobby_page.dart';
 
 class AppRoutes {
@@ -13,6 +14,7 @@ class AppRoutes {
   static const map = '/map';
   static const joinRoom = '/join-room';
   static const roomLobby = '/room-lobby';
+  static const roomGame = '/room-game';
 }
 
 class AppRouter {
@@ -60,6 +62,27 @@ class AppRouter {
               );
         return MaterialPageRoute<void>(
           builder: (_) => RoomLobbyPage(args: roomArgs),
+        );
+      case AppRoutes.roomGame:
+        final args = settings.arguments;
+        final gameArgs = args is RoomGamePageArgs
+            ? args
+            : RoomGamePageArgs(
+                lobby: const PartyLobbyData(
+                  partyId: 'local',
+                  inviteCode: '------',
+                  owner: const PartyMemberData(
+                    userId: 'owner',
+                    name: 'Owner',
+                    role: PartyMemberRole.pending,
+                  ),
+                  participants: const [],
+                  durationMinutes: 15,
+                ),
+                currentUserId: 'owner',
+              );
+        return MaterialPageRoute<void>(
+          builder: (_) => RoomGamePage(args: gameArgs),
         );
       case AppRoutes.home:
       default:
