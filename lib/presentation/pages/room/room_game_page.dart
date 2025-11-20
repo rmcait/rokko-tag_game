@@ -39,6 +39,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
   final List<String> _items = [];
   late int _remainingSeconds;
   Timer? _gameTimer;
+  String? _initErrorMessage;
 
   GoogleMapController? _mapController;
   LatLng? _currentLatLng;
@@ -50,12 +51,23 @@ class _RoomGamePageState extends State<RoomGamePage> {
   @override
   void initState() {
     super.initState();
-    _role = _resolveRole();
+    try {
+      _role = _resolveRole();
+    } catch (e, s) {
+      _initErrorMessage = 'プレイヤー情報を取得できませんでした。';
+      _role = PartyMemberRole.pending;
+      debugPrint('Failed to resolve role for user ${widget.args.currentUserId}: $e\n$s');
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _showCriticalErrorAndExit(_initErrorMessage!);
+      });
+    }
     _palette = _RolePalette.of(_role);
     _remainingSeconds = widget.args.lobby.durationMinutes * 60;
-    _startCountdown();
-    _loadCurrentLocation();
-    _loadFieldPolygon();
+    if (_initErrorMessage == null) {
+      _startCountdown();
+      _loadCurrentLocation();
+      _loadFieldPolygon();
+    }
   }
 
   @override
@@ -70,7 +82,6 @@ class _RoomGamePageState extends State<RoomGamePage> {
     final members = widget.args.lobby.allMembers;
     final me = members.firstWhere(
       (m) => m.userId == widget.args.currentUserId,
-      orElse: () => members.isNotEmpty ? members.first : widget.args.lobby.owner,
     );
     return me.role;
   }
@@ -183,8 +194,8 @@ class _RoomGamePageState extends State<RoomGamePage> {
           ),
         };
       });
-    } catch (_) {
-      // ignore draw errors
+    } catch (e, s) {
+      debugPrint('Failed to load field polygon: $e\n$s');
     }
   }
 
@@ -195,8 +206,32 @@ class _RoomGamePageState extends State<RoomGamePage> {
     );
   }
 
+  Future<void> _showCriticalErrorAndExit(String message) async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('エラー'),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+              Navigator.of(context).maybePop();
+            },
+            child: const Text('戻る'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_initErrorMessage != null) {
+      return const SizedBox.shrink();
+    }
+
     final totalPlayers = widget.args.lobby.memberCount;
     final remainingPlayers =
         (totalPlayers - _capturedCount).clamp(0, totalPlayers).toInt();
@@ -213,7 +248,30 @@ class _RoomGamePageState extends State<RoomGamePage> {
         ),
       ),
       body: WillPopScope(
-        onWillPop: () async => true,
+        onWillPop: () async {
+          final shouldExit =
+              await showDialog<bool>(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: const Text('ゲームを中断しますか？'),
+                      content: const Text('ロビー画面に戻ります。'),
+                      actions: [
+                        TextButton(
+                          onPressed: () =>
+                              Navigator.of(context).pop(false),
+                          child: const Text('キャンセル'),
+                        ),
+                        TextButton(
+                          onPressed: () =>
+                              Navigator.of(context).pop(true),
+                          child: const Text('OK'),
+                        ),
+                      ],
+                    ),
+                  ) ??
+                  false;
+          return shouldExit;
+        },
         child: Stack(
           children: [
             Positioned.fill(
