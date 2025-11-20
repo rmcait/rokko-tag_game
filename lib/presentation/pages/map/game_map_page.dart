@@ -38,7 +38,10 @@ class _GameMapPageState extends State<GameMapPage> {
 
   /// Firestore 上の全プレイヤーをマーカー表示
   Set<Marker> _playerMarkers = {};
-
+  String? _myRoleCode;            // 'TAGGER' / 'RUNNER' / 'PENDING'
+  GeoPoint? _myLastGeo;           // 自分の位置（Firestore上）
+  bool _alreadyNotifiedCaught = false;
+  
   @override
   void initState() {
     super.initState();
@@ -146,53 +149,128 @@ class _GameMapPageState extends State<GameMapPage> {
 
   /// Firestore の gameSessions/{gameId}/players を監視して
   /// すべてのプレイヤー位置をマーカーに反映
+  
   void _startPlayersWatch() {
-    _playersSub = FirebaseFirestore.instance
-        .collection('gameSessions')
-        .doc(widget.gameId)
-        .collection('players')
-        .snapshots()
-        .listen((snapshot) {
-      debugPrint(
-          '[GameMapPage] players snapshot: ${snapshot.docs.length} docs');
+  _playersSub = FirebaseFirestore.instance
+      .collection('gameSessions')
+      .doc(widget.gameId)
+      .collection('players')
+      .snapshots()
+      .listen((snapshot) async {
+    debugPrint(
+        '[GameMapPage] players snapshot: ${snapshot.docs.length} docs');
 
-      final markers = <Marker>{};
+    final markers = <Marker>{};
 
-      for (final doc in snapshot.docs) {
-        final data = doc.data();
-        final geo = data['lastLocation'] as GeoPoint?;
-        if (geo == null) continue;
+    GeoPoint? myGeo;
+    String? myRole;
+    bool myCaught = false;
 
-        final inside = (data['inside'] as bool?) ?? false;
-        final isMe = doc.id == widget.playerId;
+    // まずは全員分を読みつつ、自分の情報も拾う
+    for (final doc in snapshot.docs) {
+      final data = doc.data();
+      final geo = data['lastLocation'] as GeoPoint?;
+      if (geo == null) continue;
 
-        if (isMe) {
-        continue;
-        }
+      final role = data['role'] as String?; // TAGGER / RUNNER / PENDING
+      final caught = (data['caught'] as bool?) ?? false;
+      final isMe = doc.id == widget.playerId;
 
-        // 他プレイヤー用の色分け
-      final hue = inside
-          ? BitmapDescriptor.hueGreen   // エリア内の他プレイヤー
-          : BitmapDescriptor.hueOrange; // エリア外の他プレイヤー
-
-        markers.add(
-          Marker(
-            markerId: MarkerId('player_${doc.id}'),
-            position: LatLng(geo.latitude, geo.longitude),
-            icon: BitmapDescriptor.defaultMarkerWithHue(hue),
-            infoWindow: InfoWindow(
-              title: isMe ? 'あなた' : 'Player ${doc.id.substring(0, 4)}',
-              snippet: 'inside: $inside',
-            ),
-          ),
-        );
+      if (isMe) {
+        myGeo = geo;
+        myRole = role;
+        myCaught = caught;
+        continue; // ★ 自分の上のマーカーは出さない
       }
 
-      setState(() {
-        _playerMarkers = markers;
-      });
+      // 他プレイヤーのマーカー色を決める
+      final hue = caught
+          ? BitmapDescriptor.hueRose // 捕まってたらピンクとか
+          : BitmapDescriptor.hueOrange;
+
+      markers.add(
+        Marker(
+          markerId: MarkerId('player_${doc.id}'),
+          position: LatLng(geo.latitude, geo.longitude),
+          icon: BitmapDescriptor.defaultMarkerWithHue(hue),
+          infoWindow: InfoWindow(
+            title: 'Player ${doc.id.substring(0, 4)}',
+            snippet: 'role: $role, caught: $caught',
+          ),
+        ),
+      );
+    }
+
+    setState(() {
+      _playerMarkers = markers;
+      _myRoleCode = myRole;
+      _myLastGeo = myGeo;
     });
-  }
+
+    // ここからタッチ判定ロジック
+
+    // 自分の位置 or ロールがまだ無いなら何もしない
+    if (myGeo == null || myRole == null) {
+      return;
+    }
+
+    // ① 自分が RUNNER で、捕まったら「捕まったよ」通知したい場合（オプション）
+    if (myRole == 'RUNNER' && myCaught && !_alreadyNotifiedCaught) {
+      _alreadyNotifiedCaught = true;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('捕まってしまいました…！')),
+        );
+      }
+    }
+
+    // ② 自分が TAGGER なら、距離を見てタッチ判定
+    if (myRole != 'TAGGER') {
+      return;
+    }
+
+    const double touchThresholdMeters = 8.0; // ★ タッチ判定距離（メートル）
+
+    for (final doc in snapshot.docs) {
+      if (doc.id == widget.playerId) continue; // 自分はスキップ
+
+      final data = doc.data();
+      final role = data['role'] as String?;
+      if (role != 'RUNNER') continue; // 逃走者だけ見る
+
+      final caught = (data['caught'] as bool?) ?? false;
+      if (caught) continue; // すでに捕まってる人はスキップ
+
+      final geo = data['lastLocation'] as GeoPoint?;
+      if (geo == null) continue;
+
+      // 距離計算
+      final distance = Geolocator.distanceBetween(
+        myGeo.latitude,
+        myGeo.longitude,
+        geo.latitude,
+        geo.longitude,
+      );
+
+      if (distance <= touchThresholdMeters) {
+        debugPrint(
+            '[GameMapPage] TAGGED player ${doc.id} (distance=${distance.toStringAsFixed(1)}m)');
+
+        // Firestore 上でそのRUNNERを捕まった状態にする
+        await FirebaseFirestore.instance
+            .collection('gameSessions')
+            .doc(widget.gameId)
+            .collection('players')
+            .doc(doc.id)
+            .update({
+          'caught': true,
+          'caughtAt': FieldValue.serverTimestamp(),
+          'caughtBy': widget.playerId,
+        });
+      }
+    }
+  });
+}
 
   @override
   Widget build(BuildContext context) {

@@ -229,7 +229,23 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
       'partyId': lobby.partyId,
       'createdAt': FieldValue.serverTimestamp(),
     });
+    final batch = FirebaseFirestore.instance.batch();
+    final playersRef = FirebaseFirestore.instance
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('players');
 
+    for (final m in lobby.allMembers) {
+      final ref = playersRef.doc(m.userId);
+      batch.set(ref, {
+        'userId': m.userId,
+        'displayName': m.name,
+        'role': m.role.code,   // TAGGER / RUNNER / PENDING
+        'caught': false,       // まだ誰も捕まっていない
+      }, SetOptions(merge: true));
+    }
+
+    await batch.commit();
     // ★ 3. parties/{partyId} にゲーム開始フラグ＆gameId を保存
     await FirebaseFirestore.instance
         .collection('parties')
