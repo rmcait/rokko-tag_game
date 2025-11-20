@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../data/services/party_service.dart';
+import 'room_game_page.dart';
 
 class RoomLobbyPageArgs {
   final PartyLobbyData lobby;
@@ -59,7 +60,7 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
             stream: _partyService.watchPartyLobby(widget.args.lobby.partyId),
             initialData: widget.args.lobby,
             builder: (context, snapshot) {
-              final lobby = snapshot.data;
+              final lobby = snapshot.data ?? _latestLobby ?? widget.args.lobby;
               if (lobby == null) {
                 return const Center(
                   child: Text('ルーム情報を取得できませんでした'),
@@ -144,6 +145,14 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
     );
     if (selected != null) {
       await _partyService.updatePartyDuration(lobby.partyId, selected);
+      final refreshed =
+          await _partyService.fetchPartyLobbyById(lobby.partyId) ??
+              lobby.copyWith(durationMinutes: selected);
+      if (mounted) {
+        setState(() {
+          _latestLobby = refreshed;
+        });
+      }
     }
   }
 
@@ -212,10 +221,16 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
     if (_isStartingGame) return;
     setState(() => _isStartingGame = true);
     try {
-      // TODO: Hook actual game start logic here.
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('ゲーム開始処理はまだ実装されていません')),
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => RoomGamePage(
+            args: RoomGamePageArgs(
+              lobby: lobby,
+              currentUserId: widget.args.currentUserId,
+            ),
+          ),
+        ),
       );
     } finally {
       if (mounted) {
