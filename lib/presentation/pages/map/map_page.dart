@@ -5,9 +5,10 @@ import 'package:tag_game/core/constants/app_constants.dart';
 import 'package:tag_game/data/models/firebase_user_model.dart';
 import 'package:tag_game/data/services/field_service.dart';
 import 'package:tag_game/data/services/party_service.dart';
+import 'package:tag_game/data/services/game_service.dart';
 import 'package:tag_game/presentation/pages/map/field_history_page.dart';
 import 'package:turf/turf.dart' as turf;
-
+import 'dart:async';
 import '../room/room_lobby_page.dart';
 import '../room/room_lobby_mapper.dart';
 
@@ -16,10 +17,15 @@ class MapPageArgs {
   final bool isEditing;
   final RoomCreationParams? roomCreation;
 
+  final String? gameId;
+  final String? playerId;
+
   const MapPageArgs({
     this.initialPoints,
     this.isEditing = false,
     this.roomCreation,
+    this.gameId,
+    this.playerId,
   });
 }
 
@@ -41,11 +47,15 @@ class MapPage extends StatefulWidget {
   final List<LatLng>? initialPoints;
   final bool isEditing;
   final RoomCreationParams? roomCreation;
+  final String? gameId;
+  final String? playerId;
   const MapPage({
     super.key,
     this.initialPoints,
     this.isEditing = false,
     this.roomCreation,
+    this.gameId,
+    this.playerId,
   });
 
   @override
@@ -58,6 +68,13 @@ class _MapPageState extends State<MapPage> {
   bool _isLoading = true;
   String? _errorMessage;
   bool _isSubmitting = false;
+
+  /// 位置情報ストリーム用
+  StreamSubscription<Position>? _posSub;
+
+  /// ユーザー現在位置マーカー
+  Marker? _userMarker;
+  bool _isInside = false;
 
   /// ユーザーがタップした頂点（最大4つ）
   final List<LatLng> _points = [];
@@ -76,7 +93,9 @@ class _MapPageState extends State<MapPage> {
   @override
   void initState() {
     super.initState();
-    _loadCurrentLocation();
+    _loadCurrentLocation().then((_) {
+    _startLocationWatch();  // ← 位置情報の継続監視を開始
+  });
 
     if (widget.initialPoints != null) {
       _points.addAll(widget.initialPoints!);
@@ -133,6 +152,42 @@ class _MapPageState extends State<MapPage> {
     }
   }
 
+  void _startLocationWatch() {
+  _posSub = Geolocator.getPositionStream(
+    locationSettings: const LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 5, // 5mごとに更新
+    ),
+  ).listen((pos) async {
+    final current = LatLng(pos.latitude, pos.longitude);
+
+    // Turfでエリア内外判定
+    final inside = _points.length >= 3 ? _isPointInsideField(current) : false;
+
+    setState(() {
+      _isInside = inside;
+      _userMarker = Marker(
+        markerId: const MarkerId('user'),
+        position: current,
+        zIndex: 10,
+        icon: BitmapDescriptor.defaultMarkerWithHue(
+          inside ? BitmapDescriptor.hueAzure : BitmapDescriptor.hueRed,
+        ),
+      );
+    });
+
+    // ★ ゲーム中なら位置をFirestoreへ同期
+    if (widget.gameId != null && widget.playerId != null) {
+      await GameService().updatePlayerLocation(
+        gameId: widget.gameId!,
+        playerId: widget.playerId!,
+        lat: pos.latitude,
+        lng: pos.longitude,
+        inside: inside,
+      );
+    }
+  });
+}
   void _onMapCreated(GoogleMapController controller) {
     _mapController = controller;
     if (_currentLatLng != null) {
@@ -144,6 +199,7 @@ class _MapPageState extends State<MapPage> {
 
   @override
   void dispose() {
+    _posSub?.cancel();
     _cleanupCreatedParty();
     _mapController?.dispose();
     super.dispose();
