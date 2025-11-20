@@ -493,4 +493,21 @@ class PartyService {
       'updatedAt': FieldValue.serverTimestamp(),
     });
   }
+
+  Future<List<LatLng>?> fetchPartyPolygon(String partyId) async {
+    final doc = await _parties.doc(partyId).get();
+    if (!doc.exists) return null;
+    final data = doc.data();
+    final poly = data?['area']?['polygon'] as List<dynamic>?;
+    if (poly == null || poly.isEmpty) return null;
+    final points = <LatLng>[];
+    for (final p in poly) {
+      final lat = (p['lat'] as num?)?.toDouble();
+      final lng = (p['lng'] as num?)?.toDouble();
+      if (lat != null && lng != null) {
+        points.add(LatLng(lat, lng));
+      }
+    }
+    return points;
+  }
 }

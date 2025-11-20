@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../../data/services/party_service.dart';
 import 'package:tag_game/presentation/pages/map/map_page.dart';
 import 'package:tag_game/presentation/pages/map/game_map_page.dart';
+import 'room_game_page.dart';
 
 class RoomLobbyPageArgs {
   final PartyLobbyData lobby;
@@ -63,7 +64,7 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
             stream: _partyService.watchPartyLobby(widget.args.lobby.partyId),
             initialData: widget.args.lobby,
             builder: (context, snapshot) {
-              final lobby = snapshot.data;
+              final lobby = snapshot.data ?? _latestLobby ?? widget.args.lobby;
               if (lobby == null) {
                 return const Center(
                   child: Text('ルーム情報を取得できませんでした'),
@@ -149,6 +150,14 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
     );
     if (selected != null) {
       await _partyService.updatePartyDuration(lobby.partyId, selected);
+      final refreshed =
+          await _partyService.fetchPartyLobbyById(lobby.partyId) ??
+              lobby.copyWith(durationMinutes: selected);
+      if (mounted) {
+        setState(() {
+          _latestLobby = refreshed;
+        });
+      }
     }
   }
 
@@ -218,32 +227,72 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
   setState(() => _isStartingGame = true);
 
   try {
-    // ★ 1. 共通で使う gameId を決める（とりあえず partyId ベースでOK）
+    // 1. gameId を決める（partyId ベースでOK）
     final gameId = 'game_${lobby.partyId}';
 
-    // ★ 2. gameSessions にゲームセッションを作成
-    await FirebaseFirestore.instance
-        .collection('gameSessions')
-        .doc(gameId)
-        .set({
+    final firestore = FirebaseFirestore.instance;
+    final gameDoc = firestore.collection('gameSessions').doc(gameId);
+    final partyDoc = firestore.collection('parties').doc(lobby.partyId);
+
+    final batch = firestore.batch();
+
+    // 2. gameSessions/{gameId} を作成
+    batch.set(gameDoc, {
       'partyId': lobby.partyId,
       'createdAt': FieldValue.serverTimestamp(),
     });
-    final batch = FirebaseFirestore.instance.batch();
-    final playersRef = FirebaseFirestore.instance
-        .collection('gameSessions')
-        .doc(gameId)
-        .collection('players');
 
+    // 3. gameSessions/{gameId}/players に全メンバーを書き込む
+    final playersRef = gameDoc.collection('players');
     for (final m in lobby.allMembers) {
       final ref = playersRef.doc(m.userId);
-      batch.set(ref, {
-        'userId': m.userId,
-        'displayName': m.name,
-        'role': m.role.code,   // TAGGER / RUNNER / PENDING
-        'caught': false,       // まだ誰も捕まっていない
-      }, SetOptions(merge: true));
+      batch.set(
+        ref,
+        {
+          'userId': m.userId,
+          'displayName': m.name,
+          'role': m.role.code, // TAGGER / RUNNER / PENDING
+          'caught': false,
+          'inside': false,
+          'lastLocation': null,
+        },
+        SetOptions(merge: true),
+      );
     }
+
+    // 4. parties/{partyId} 側にも状態を保存
+    batch.update(partyDoc, {
+      'status': 'PLAYING',
+      'activeGameId': gameId,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+
+    // まとめて反映
+    await batch.commit();
+
+    // 5. 自分のプレイヤーIDを拾ってゲーム画面へ
+    final me = _findMemberById(lobby.allMembers, widget.args.currentUserId);
+    if (!mounted || me == null) return;
+
+    await Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => GameMapPage(
+          gameId: gameId,
+          playerId: me.userId,
+        ),
+      ),
+    );
+  } catch (e) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('ゲーム開始に失敗しました: $e')),
+    );
+  } finally {
+    if (mounted) {
+      setState(() => _isStartingGame = false);
+    }
+  }
+}
 
     await batch.commit();
     // ★ 3. parties/{partyId} にゲーム開始フラグ＆gameId を保存
