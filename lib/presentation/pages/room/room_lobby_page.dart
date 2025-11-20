@@ -264,6 +264,11 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
 }
 void _maybeNavigateToGame(PartyLobbyData lobby) {
   // すでに遷移していたら何もしない
+  debugPrint(
+    '[RoomLobby] maybeNavigateToGame '
+    'status=${lobby.status}, activeGameId=${lobby.activeGameId}, '
+    'navigated=$_navigatedToGame, currentUser=${widget.args.currentUserId}',
+  );
   if (_navigatedToGame) return;
 
   // Firestore 上の status が PLAYING でなければまだ待機
