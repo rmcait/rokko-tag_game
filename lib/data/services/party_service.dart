@@ -100,6 +100,7 @@ class PartyMemberData {
 class PartyLobbyData {
   final String partyId;
   final String inviteCode;
+  final String status;
   final PartyMemberData owner;
   final List<PartyMemberData> participants;
   final int durationMinutes;
@@ -107,6 +108,7 @@ class PartyLobbyData {
   const PartyLobbyData({
     required this.partyId,
     required this.inviteCode,
+    this.status = 'WAITING',
     required this.owner,
     required this.participants,
     required this.durationMinutes,
@@ -435,10 +437,46 @@ class PartyService {
     return PartyLobbyData(
       partyId: partyDoc.id,
       inviteCode: data['inviteCode'] as String? ?? '------',
+      status: data['status'] as String? ?? 'WAITING',
       owner: ownerMember,
       participants: participants,
       durationMinutes: duration,
     );
+  }
+
+  /// Start a game for this party. Creates a minimal `gameSessions` doc and
+  /// updates the party with `status` = 'IN_PROGRESS' and `gameId`.
+  Future<void> startGame(String partyId) async {
+    final docRef = _parties.doc(partyId);
+    final gameRef = _firestore.collection('gameSessions').doc();
+
+    final batch = _firestore.batch();
+    batch.set(gameRef, {
+      'gameId': gameRef.id,
+      'partyId': partyId,
+      'status': 'ACTIVE',
+      'startAt': FieldValue.serverTimestamp(),
+      'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+
+    batch.update(docRef, {
+      'status': 'IN_PROGRESS',
+      'gameId': gameRef.id,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+
+    await batch.commit();
+  }
+
+  /// Reset party status back to WAITING so that lobby members can re-enter.
+  /// Also clears the associated gameId for mock gameplay loops.
+  Future<void> resetPartyToWaiting(String partyId) async {
+    await _parties.doc(partyId).update({
+      'status': 'WAITING',
+      'gameId': FieldValue.delete(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
   }
 
   Future<String> _generateUniqueInviteCode({int maxAttempts = 8}) async {

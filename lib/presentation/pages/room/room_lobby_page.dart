@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../data/services/party_service.dart';
+import '../../../core/constants/app_constants.dart';
+import '../play/mock_play_page.dart';
+import '../play/mock_tagger_page.dart';
 
 class RoomLobbyPageArgs {
   final PartyLobbyData lobby;
@@ -34,6 +37,7 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
   bool _isStartingGame = false;
   PartyLobbyData? _latestLobby;
   bool _durationPromptScheduled = false;
+  bool _navigatedToGame = false;
 
   @override
   Widget build(BuildContext context) {
@@ -65,7 +69,20 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
                   child: Text('ルーム情報を取得できませんでした'),
                 );
               }
+              // detect transition to IN_PROGRESS and navigate players accordingly
               _latestLobby = lobby;
+              if (lobby.status != 'IN_PROGRESS') {
+                _navigatedToGame = false;
+              }
+              if (!_navigatedToGame &&
+                  lobby.status == 'IN_PROGRESS' &&
+                  AppConstants.useMockUi) {
+                _navigateToMockGame(lobby);
+                return const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Center(child: CircularProgressIndicator()),
+                );
+              }
               _maybeShowDurationPrompt(lobby);
               final members = lobby.allMembers;
               final currentMember =
@@ -212,7 +229,14 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
     if (_isStartingGame) return;
     setState(() => _isStartingGame = true);
     try {
-      // TODO: Hook actual game start logic here.
+      // For mock UI: mark party as IN_PROGRESS and create a minimal gameSession.
+      if (AppConstants.useMockUi) {
+        await _partyService.startGame(lobby.partyId);
+        _navigateToMockGame(lobby);
+        return;
+      }
+
+      // TODO: Hook actual game start logic here when not using mock UI.
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('ゲーム開始処理はまだ実装されていません')),
@@ -243,6 +267,40 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
             lobby.owner.userId == widget.args.currentUserId,
       ),
     );
+  }
+
+  void _navigateToMockGame(PartyLobbyData lobby) {
+    if (_navigatedToGame || !AppConstants.useMockUi) return;
+    _navigatedToGame = true;
+    final members = lobby.allMembers;
+    final currentMember = _findMemberById(members, widget.args.currentUserId);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      if (currentMember != null && currentMember.role == PartyMemberRole.tagger) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute<void>(
+            builder: (_) => MockTaggerPage(
+              partyId: lobby.partyId,
+              gameId: lobby.partyId,
+              currentUserId: widget.args.currentUserId,
+            ),
+          ),
+        );
+      } else {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute<void>(
+            builder: (_) => MockPlayPage(
+              partyId: lobby.partyId,
+              gameId: lobby.partyId,
+              currentUserId: widget.args.currentUserId,
+            ),
+          ),
+        );
+      }
+    });
   }
 }
 
