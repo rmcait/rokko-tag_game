@@ -23,12 +23,14 @@ class GameMapPage extends StatefulWidget {
 
 class _PlayerInfo {
   final String id;
+  final String name;
   final LatLng position;
   final bool isMe;
   final bool inside;
 
   const _PlayerInfo({
     required this.id,
+    required this.name,
     required this.position,
     required this.isMe,
     required this.inside,
@@ -42,10 +44,7 @@ class _GameMapPageState extends State<GameMapPage> {
   bool _isLoading = true;
   String? _errorMessage;
 
-  // 位置情報ストリーム
   StreamSubscription<Position>? _posSub;
-
-  // Firestore の players サブコレクション監視
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _playersSub;
 
   /// プレイヤー情報（UI とタッチ判定用）
@@ -167,8 +166,7 @@ class _GameMapPageState extends State<GameMapPage> {
         playerId: widget.playerId,
         lat: pos.latitude,
         lng: pos.longitude,
-        // inside はとりあえず false（まだエリア判定をここではやらない）
-        inside: false,
+        inside: false, // エリア判定は別で
       );
 
       debugPrint('[GameMapPage] updatePlayerLocation done');
@@ -194,7 +192,6 @@ class _GameMapPageState extends State<GameMapPage> {
       String? myRole;
       bool myCaught = false;
 
-      // プレイヤー情報を構築しつつ、自分の状態も取得
       for (final doc in snapshot.docs) {
         final data = doc.data();
         final geo = data['lastLocation'] as GeoPoint?;
@@ -205,6 +202,11 @@ class _GameMapPageState extends State<GameMapPage> {
         final caught = (data['caught'] as bool?) ?? false;
         final isMe = doc.id == widget.playerId;
 
+        // Firestore に displayName / nickname があれば拾う
+        final firestoreName = data['displayName'] as String? ??
+            data['nickname'] as String?;
+        final name = firestoreName ?? 'Player';
+
         if (isMe) {
           myGeo = geo;
           myRole = role;
@@ -214,6 +216,7 @@ class _GameMapPageState extends State<GameMapPage> {
         players.add(
           _PlayerInfo(
             id: doc.id,
+            name: name,
             position: LatLng(geo.latitude, geo.longitude),
             isMe: isMe,
             inside: inside,
@@ -221,7 +224,6 @@ class _GameMapPageState extends State<GameMapPage> {
         );
       }
 
-      // 状態を更新（これで HUD 用の _players と、自分のロール/位置も保存）
       setState(() {
         _players = players;
         _myLastGeo = myGeo;
@@ -231,9 +233,8 @@ class _GameMapPageState extends State<GameMapPage> {
       // マップ上バッジの位置を更新
       _updatePlayerOverlays();
 
-      // ここからタッチ判定ロジック ------------------------------
+      // --- ここからタッチ判定ロジック ---
 
-      // 自分の位置 or ロールがまだ無いなら何もしない
       if (myGeo == null || myRole == null) {
         return;
       }
@@ -253,22 +254,21 @@ class _GameMapPageState extends State<GameMapPage> {
         return;
       }
 
-      const double touchThresholdMeters = 8.0; // タッチ判定距離（メートル）
+      const double touchThresholdMeters = 8.0; // タッチ判定距離
 
       for (final doc in snapshot.docs) {
-        if (doc.id == widget.playerId) continue; // 自分はスキップ
+        if (doc.id == widget.playerId) continue;
 
         final data = doc.data();
         final role = data['role'] as String?;
-        if (role != 'RUNNER') continue; // 逃走者だけ見る
+        if (role != 'RUNNER') continue;
 
         final caught = (data['caught'] as bool?) ?? false;
-        if (caught) continue; // すでに捕まってる人はスキップ
+        if (caught) continue;
 
         final geo = data['lastLocation'] as GeoPoint?;
         if (geo == null) continue;
 
-        // 距離計算
         final distance = Geolocator.distanceBetween(
           myGeo.latitude,
           myGeo.longitude,
@@ -281,7 +281,6 @@ class _GameMapPageState extends State<GameMapPage> {
             '[GameMapPage] TAGGED player ${doc.id} (distance=${distance.toStringAsFixed(1)}m)',
           );
 
-          // Firestore 上でその RUNNER を捕まった状態にする
           await FirebaseFirestore.instance
               .collection('gameSessions')
               .doc(widget.gameId)
@@ -306,7 +305,6 @@ class _GameMapPageState extends State<GameMapPage> {
     final newPositions = <String, Offset>{};
 
     for (final p in _players) {
-      // 画面上の座標に変換
       final screen = await controller.getScreenCoordinate(p.position);
       newPositions[p.id] = Offset(
         screen.x.toDouble(),
@@ -340,13 +338,13 @@ class _GameMapPageState extends State<GameMapPage> {
                 ? Colors.blueAccent
                 : (p.inside ? Colors.green : Colors.orange);
 
-            final name = isMe ? 'あなた' : 'Player ${p.id.substring(0, 4)}';
+            // HUD では自分だけ「あなた」、他は Player
+            final displayLabel = isMe ? 'あなた' : 'Player';
 
             return Padding(
               padding: const EdgeInsets.only(right: 8),
               child: GestureDetector(
                 onTap: () {
-                  // タップした人の位置にカメラを寄せる
                   _mapController?.animateCamera(
                     CameraUpdate.newLatLngZoom(p.position, 17),
                   );
@@ -361,7 +359,7 @@ class _GameMapPageState extends State<GameMapPage> {
                     ),
                   ),
                   label: Text(
-                    name,
+                    displayLabel,
                     style: const TextStyle(color: Colors.white),
                   ),
                   backgroundColor: Colors.black.withOpacity(0.7),
@@ -382,22 +380,24 @@ class _GameMapPageState extends State<GameMapPage> {
       final pos = _playerScreenPositions[p.id];
       if (pos == null) continue;
 
-      // 自分の上には表示したくないならここで continue
-      // if (p.isMe) continue;
+      // 自分の上には表示しない（青丸だけ）
+      if (p.isMe) continue;
 
       final isMe = p.isMe;
       final color = isMe
           ? Colors.blueAccent
           : (p.inside ? Colors.green : Colors.orange);
-      final name = isMe ? 'あなた' : 'Player ${p.id.substring(0, 4)}';
+
+      // ここも自分以外は "Player" 固定
+      final displayLabel = isMe ? 'あなた' : 'Player';
 
       widgets.add(
         Positioned(
-          left: pos.dx - 40, // ざっくり中央寄せ
+          left: pos.dx - 40,
           top: pos.dy - 40,
           child: _PlayerBadge(
             color: color,
-            label: name,
+            label: displayLabel,   // ← 修正ポイント
             isMe: isMe,
           ),
         ),
@@ -456,7 +456,6 @@ class _GameMapPageState extends State<GameMapPage> {
           GoogleMap(
             onMapCreated: _onMapCreated,
             onCameraMove: (_) {
-              // カメラ移動のたびに少し待ってからオーバーレイ更新
               _overlayUpdateDebounce?.cancel();
               _overlayUpdateDebounce =
                   Timer(const Duration(milliseconds: 50), _updatePlayerOverlays);
@@ -465,12 +464,12 @@ class _GameMapPageState extends State<GameMapPage> {
               target: _currentLatLng ?? const LatLng(35.681236, 139.767125),
               zoom: 16,
             ),
-            myLocationEnabled: true, // 青丸はこれで出す
+            myLocationEnabled: true,
             myLocationButtonEnabled: true,
             markers: _itemMarkers, // プレイヤーは表示せず、アイテム用のみ
           ),
-          _buildPlayersHud(),        // 画面上部の一覧
-          ..._buildPlayerOverlays(), // マップ上の位置にバッジ
+          _buildPlayersHud(),
+          ..._buildPlayerOverlays(),
         ],
       ),
     );
