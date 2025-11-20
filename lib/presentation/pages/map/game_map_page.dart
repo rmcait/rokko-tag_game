@@ -51,13 +51,19 @@ class _GameMapPageState extends State<GameMapPage> {
   /// プレイヤー情報（UI とタッチ判定用）
   List<_PlayerInfo> _players = [];
 
+  /// プレイヤーIDごとの画面座標（マップ上の位置にバッジを重ねる用）
+  Map<String, Offset> _playerScreenPositions = {};
+
   /// 自分の Firestore 上の状態
-  String? _myRoleCode;     // 'TAGGER' / 'RUNNER' / 'PENDING'
-  GeoPoint? _myLastGeo;    // 自分の位置（Firestore 上）
+  String? _myRoleCode; // 'TAGGER' / 'RUNNER' / 'PENDING'
+  GeoPoint? _myLastGeo; // 自分の位置（Firestore 上）
   bool _alreadyNotifiedCaught = false;
 
   /// アイテム用マーカー（今は空）
   final Set<Marker> _itemMarkers = {};
+
+  /// カメラ移動時のオーバーレイ更新デバウンス
+  Timer? _overlayUpdateDebounce;
 
   @override
   void initState() {
@@ -76,6 +82,7 @@ class _GameMapPageState extends State<GameMapPage> {
   void dispose() {
     _posSub?.cancel();
     _playersSub?.cancel();
+    _overlayUpdateDebounce?.cancel();
     _mapController?.dispose();
     super.dispose();
   }
@@ -133,6 +140,8 @@ class _GameMapPageState extends State<GameMapPage> {
         CameraUpdate.newLatLngZoom(_currentLatLng!, 16),
       );
     }
+    // マップ生成直後にも一度オーバーレイ更新しておく
+    _updatePlayerOverlays();
   }
 
   /// 自分の端末位置を監視して Firestore に送る
@@ -219,6 +228,9 @@ class _GameMapPageState extends State<GameMapPage> {
         _myRoleCode = myRole;
       });
 
+      // マップ上バッジの位置を更新
+      _updatePlayerOverlays();
+
       // ここからタッチ判定ロジック ------------------------------
 
       // 自分の位置 or ロールがまだ無いなら何もしない
@@ -285,6 +297,29 @@ class _GameMapPageState extends State<GameMapPage> {
     });
   }
 
+  /// プレイヤー位置を画面座標に変換して、_playerScreenPositions を更新
+  Future<void> _updatePlayerOverlays() async {
+    if (_mapController == null) return;
+    if (_players.isEmpty) return;
+
+    final controller = _mapController!;
+    final newPositions = <String, Offset>{};
+
+    for (final p in _players) {
+      // 画面上の座標に変換
+      final screen = await controller.getScreenCoordinate(p.position);
+      newPositions[p.id] = Offset(
+        screen.x.toDouble(),
+        screen.y.toDouble(),
+      );
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _playerScreenPositions = newPositions;
+    });
+  }
+
   /// 画面上部にプレイヤー一覧（名前＋アイコン）を表示する HUD
   Widget _buildPlayersHud() {
     if (_players.isEmpty) {
@@ -339,6 +374,39 @@ class _GameMapPageState extends State<GameMapPage> {
     );
   }
 
+  /// マップ上にプレイヤー位置へバッジを重ねるオーバーレイ
+  List<Widget> _buildPlayerOverlays() {
+    final widgets = <Widget>[];
+
+    for (final p in _players) {
+      final pos = _playerScreenPositions[p.id];
+      if (pos == null) continue;
+
+      // 自分の上には表示したくないならここで continue
+      // if (p.isMe) continue;
+
+      final isMe = p.isMe;
+      final color = isMe
+          ? Colors.blueAccent
+          : (p.inside ? Colors.green : Colors.orange);
+      final name = isMe ? 'あなた' : 'Player ${p.id.substring(0, 4)}';
+
+      widgets.add(
+        Positioned(
+          left: pos.dx - 40, // ざっくり中央寄せ
+          top: pos.dy - 40,
+          child: _PlayerBadge(
+            color: color,
+            label: name,
+            isMe: isMe,
+          ),
+        ),
+      );
+    }
+
+    return widgets;
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
@@ -387,16 +455,74 @@ class _GameMapPageState extends State<GameMapPage> {
         children: [
           GoogleMap(
             onMapCreated: _onMapCreated,
+            onCameraMove: (_) {
+              // カメラ移動のたびに少し待ってからオーバーレイ更新
+              _overlayUpdateDebounce?.cancel();
+              _overlayUpdateDebounce =
+                  Timer(const Duration(milliseconds: 50), _updatePlayerOverlays);
+            },
             initialCameraPosition: CameraPosition(
               target: _currentLatLng ?? const LatLng(35.681236, 139.767125),
               zoom: 16,
             ),
             myLocationEnabled: true, // 青丸はこれで出す
             myLocationButtonEnabled: true,
-            markers: _itemMarkers,   // ★ プレイヤーは表示せず、アイテム用のみ
+            markers: _itemMarkers, // プレイヤーは表示せず、アイテム用のみ
           ),
-          _buildPlayersHud(),        // ★ 上部に名前＋アイコン
+          _buildPlayersHud(),        // 画面上部の一覧
+          ..._buildPlayerOverlays(), // マップ上の位置にバッジ
         ],
+      ),
+    );
+  }
+}
+
+/// マップ上に重ねる小さめのプレイヤーバッジ
+class _PlayerBadge extends StatelessWidget {
+  final Color color;
+  final String label;
+  final bool isMe;
+
+  const _PlayerBadge({
+    required this.color,
+    required this.label,
+    required this.isMe,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      elevation: 2,
+      borderRadius: BorderRadius.circular(16),
+      color: Colors.transparent,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.7),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircleAvatar(
+              radius: 9,
+              backgroundColor: color,
+              child: Icon(
+                isMe ? Icons.person : Icons.person_outline,
+                size: 12,
+                color: Colors.white,
+              ),
+            ),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
