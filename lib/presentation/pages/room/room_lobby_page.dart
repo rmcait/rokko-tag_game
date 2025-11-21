@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../../../data/services/party_service.dart';
 import 'room_game_page.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
+import '../../routes.dart';
 class RoomLobbyPageArgs {
   final PartyLobbyData lobby;
   final String currentUserId;
@@ -35,6 +35,10 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
   bool _isStartingGame = false;
   PartyLobbyData? _latestLobby;
   bool _durationPromptScheduled = false;
+  bool _hasNavigatedToGame = false;
+  bool _roleRevealShown = false;
+  
+  
 
   @override
   Widget build(BuildContext context) {
@@ -68,9 +72,44 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
               }
               _latestLobby = lobby;
               _maybeShowDurationPrompt(lobby);
+              // ★★★ 全員自動遷移ロジック ★★★
+              // ステータスが IN_PROGRESS になり、gameId が確定しており、まだ遷移していない場合
+              if (lobby.status == 'IN_PROGRESS' &&
+                  lobby.gameId != null &&
+                  lobby.gameId!.isNotEmpty &&
+                  !_hasNavigatedToGame) {
+                _hasNavigatedToGame = true;
+                // 描画完了後に遷移を実行
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  Navigator.of(context).pushReplacementNamed(
+                    AppRoutes.roomGame, // AppRoutesを使用
+                    arguments: RoomGamePageArgs(
+                      lobby: lobby,
+                      currentUserId: widget.args.currentUserId,
+                      gameId: lobby.gameId!,
+                    ),
+                  );
+                });
+              }
               final members = lobby.allMembers;
               final currentMember =
                   _findMemberById(members, widget.args.currentUserId);
+              final rolesAssigned = members.isNotEmpty &&
+                  members.every(
+                    (m) => m.role != PartyMemberRole.pending,
+                  );
+
+              // 役割未確定なら次回の割り当てで再表示できるようフラグを戻す。
+              if (!rolesAssigned) {
+                _roleRevealShown = false;
+              }
+
+              if (rolesAssigned && !_roleRevealShown && currentMember != null) {
+                _roleRevealShown = true;
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  _openRoleReveal(lobby, currentMember);
+                });
+              }
               return Padding(
                 padding: const EdgeInsets.all(24),
                 child: _LobbyLayout(
@@ -170,17 +209,20 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
     PartyMemberData currentMember,
   ) async {
     if (_isAssigning) return;
-    setState(() => _isAssigning = true);
+    setState(() {
+      _isAssigning = true;
+      // 新しい割り当ての結果を全員に見せるためリセットする。
+      _roleRevealShown = false;
+    });
     try {
       await _partyService.assignRolesRandomly(lobby.partyId);
       final updated =
           await _partyService.fetchPartyLobbyById(lobby.partyId) ?? lobby;
-      if (!mounted) return;
-      final refreshedMember = updated.allMembers.firstWhere(
-        (m) => m.userId == currentMember.userId,
-        orElse: () => currentMember,
-      );
-      await _openRoleReveal(updated, refreshedMember);
+      if (mounted) {
+        setState(() {
+          _latestLobby = updated;
+        });
+      }
     } on PartyJoinException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -215,60 +257,46 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
   }
 
   Future<void> _startGame(PartyLobbyData lobby) async {
-  if (_isStartingGame) return;
-  setState(() => _isStartingGame = true);
+    if (lobby.owner.userId != widget.args.currentUserId) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('ホストだけが開始できます')),
+        );
+      }
+      return;
+    }
+    if (_isStartingGame) return;
+    setState(() => _isStartingGame = true);
 
-  try {
-    // ★ partyId 固定のドキュメントを使う
-    final gameDoc = FirebaseFirestore.instance
-        .collection('gameSessions')
-        .doc(lobby.partyId);
+    try {
+      if (!mounted) return;
+      final gameId = await _partyService.startGame(lobby);
 
-    // 既にあれば作り直さない
-    final snap = await gameDoc.get();
-    if (!snap.exists) {
-      await gameDoc.set({
-        'partyId': lobby.partyId,
-        'createdAt': FieldValue.serverTimestamp(),
-        'durationMinutes': lobby.durationMinutes,
-      });
-
-      final allMembers = lobby.allMembers;
-      for (final m in allMembers) {
-        await gameDoc.collection('players').doc(m.userId).set({
-          'displayName': m.name,
-          'role': switch (m.role) {
-            PartyMemberRole.tagger => 'TAGGER',
-            PartyMemberRole.runner => 'RUNNER',
-            _ => 'PENDING',
-          },
-          'inside': true,
-          'caught': false,
-          'createdAt': FieldValue.serverTimestamp(),
-        });
+      final navLobby = (_latestLobby ?? lobby).copyWith(
+        status: 'IN_PROGRESS',
+        gameId: gameId,
+      );
+      _hasNavigatedToGame = true;
+      _isStartingGame = false;
+      if (mounted) {
+        Navigator.of(context).pushReplacementNamed(
+          AppRoutes.roomGame,
+          arguments: RoomGamePageArgs(
+            lobby: navLobby,
+            currentUserId: widget.args.currentUserId,
+            gameId: gameId,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('ゲーム開始に失敗しました: $e')),
+        );
+        setState(() => _isStartingGame = false);
       }
     }
-
-    if (!mounted) return;
-
-    // ★ gameId には partyId を渡す（＝ doc の ID と揃う）
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => RoomGamePage(
-          args: RoomGamePageArgs(
-            lobby: lobby,
-            currentUserId: widget.args.currentUserId,
-            gameId: lobby.partyId,
-          ),
-        ),
-      ),
-    );
-  } finally {
-    if (mounted) {
-      setState(() => _isStartingGame = false);
-    }
   }
-}
 
   void _copyRoomCode(String code) {
     Clipboard.setData(ClipboardData(text: code));

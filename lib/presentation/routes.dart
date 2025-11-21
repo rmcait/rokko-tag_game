@@ -59,6 +59,7 @@ class AppRouter {
                   ),
                   participants: const [],
                   durationMinutes: 15,
+                  status: 'WAITING', // ★追加
                 ),
                 currentUserId: 'owner',
               );
@@ -80,6 +81,7 @@ class AppRouter {
                   ),
                   participants: [],
                   durationMinutes: 15,
+                  status: 'IN_PROGRESS', // ★追加
                 ),
                 currentUserId: 'owner',
                 gameId: 'local-game',
