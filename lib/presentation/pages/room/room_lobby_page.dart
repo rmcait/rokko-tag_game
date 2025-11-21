@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../../../data/services/party_service.dart';
 import 'room_game_page.dart';
-
+import 'package:cloud_firestore/cloud_firestore.dart';
 class RoomLobbyPageArgs {
   final PartyLobbyData lobby;
   final String currentUserId;
@@ -80,9 +80,7 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
                   isOwner: lobby.owner.userId == widget.args.currentUserId,
                   isAssigning: _isAssigning,
                   rolesAssigned: members.isNotEmpty &&
-                      members.every(
-                        (m) => m.role != PartyMemberRole.pending,
-                      ),
+                      members.every((m) => m.role != PartyMemberRole.pending),
                   onAssignRoles: currentMember == null
                       ? null
                       : () => _handleAssignRoles(lobby, currentMember),
@@ -91,9 +89,8 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
                       : () => _openRoleReveal(lobby, currentMember),
                   onCopyCode: () => _copyRoomCode(lobby.inviteCode),
                   isStartingGame: _isStartingGame,
-                  onStartGame: lobby.owner.userId == widget.args.currentUserId
-                      ? () => _startGame(lobby)
-                      : null,
+                  // ★ ここを変更：全員 onStartGame を持つようにする
+                  onStartGame: () => _startGame(lobby),
                   onEditDuration: (lobby.owner.userId == widget.args.currentUserId &&
                           members.every((m) => m.role == PartyMemberRole.pending))
                       ? () => _showDurationPicker(lobby)
@@ -218,26 +215,60 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
   }
 
   Future<void> _startGame(PartyLobbyData lobby) async {
-    if (_isStartingGame) return;
-    setState(() => _isStartingGame = true);
-    try {
-      if (!mounted) return;
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => RoomGamePage(
-            args: RoomGamePageArgs(
-              lobby: lobby,
-              currentUserId: widget.args.currentUserId,
-            ),
-          ),
-        ),
-      );
-    } finally {
-      if (mounted) {
-        setState(() => _isStartingGame = false);
+  if (_isStartingGame) return;
+  setState(() => _isStartingGame = true);
+
+  try {
+    // ★ partyId 固定のドキュメントを使う
+    final gameDoc = FirebaseFirestore.instance
+        .collection('gameSessions')
+        .doc(lobby.partyId);
+
+    // 既にあれば作り直さない
+    final snap = await gameDoc.get();
+    if (!snap.exists) {
+      await gameDoc.set({
+        'partyId': lobby.partyId,
+        'createdAt': FieldValue.serverTimestamp(),
+        'durationMinutes': lobby.durationMinutes,
+      });
+
+      final allMembers = lobby.allMembers;
+      for (final m in allMembers) {
+        await gameDoc.collection('players').doc(m.userId).set({
+          'displayName': m.name,
+          'role': switch (m.role) {
+            PartyMemberRole.tagger => 'TAGGER',
+            PartyMemberRole.runner => 'RUNNER',
+            _ => 'PENDING',
+          },
+          'inside': true,
+          'caught': false,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
       }
     }
+
+    if (!mounted) return;
+
+    // ★ gameId には partyId を渡す（＝ doc の ID と揃う）
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => RoomGamePage(
+          args: RoomGamePageArgs(
+            lobby: lobby,
+            currentUserId: widget.args.currentUserId,
+            gameId: lobby.partyId,
+          ),
+        ),
+      ),
+    );
+  } finally {
+    if (mounted) {
+      setState(() => _isStartingGame = false);
+    }
   }
+}
 
   void _copyRoomCode(String code) {
     Clipboard.setData(ClipboardData(text: code));
