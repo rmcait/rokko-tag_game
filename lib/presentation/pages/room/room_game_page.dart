@@ -557,30 +557,32 @@ Future<void> _handleTagLogic({
 
                 // ③ ズームボタン（右下）
                 Positioned(
-                  bottom: 100,
                   right: 16,
+                  bottom: 200, // ← StatsBar より上に配置（必要に応じて調整）
                   child: Column(
                     children: [
                       FloatingActionButton(
+                        heroTag: 'zoomIn',
                         mini: true,
-                        heroTag: "zoom_in",
+                        backgroundColor: Colors.white,
                         onPressed: () {
                           _mapController?.animateCamera(
                             CameraUpdate.zoomIn(),
                           );
                         },
-                        child: const Icon(Icons.add),
+                        child: const Icon(Icons.add, color: Colors.black),
                       ),
                       const SizedBox(height: 12),
                       FloatingActionButton(
+                        heroTag: 'zoomOut',
                         mini: true,
-                        heroTag: "zoom_out",
+                        backgroundColor: Colors.white,
                         onPressed: () {
                           _mapController?.animateCamera(
                             CameraUpdate.zoomOut(),
                           );
                         },
-                        child: const Icon(Icons.remove),
+                        child: const Icon(Icons.remove, color: Colors.black),
                       ),
                     ],
                   ),
