@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -103,19 +104,25 @@ class PartyLobbyData {
   final PartyMemberData owner;
   final List<PartyMemberData> participants;
   final int durationMinutes;
-
+  // ★追加: DBのステータスとゲームIDを受け取る
+  final String status; 
+  final String? gameId; 
   const PartyLobbyData({
     required this.partyId,
     required this.inviteCode,
     required this.owner,
     required this.participants,
     required this.durationMinutes,
+    required this.status,
+    this.gameId,
   });
 
   PartyLobbyData copyWith({
     PartyMemberData? owner,
     List<PartyMemberData>? participants,
     int? durationMinutes,
+    String? status,
+    String? gameId,
   }) {
     return PartyLobbyData(
       partyId: partyId,
@@ -123,12 +130,52 @@ class PartyLobbyData {
       owner: owner ?? this.owner,
       participants: participants ?? this.participants,
       durationMinutes: durationMinutes ?? this.durationMinutes,
+      status: status ?? this.status,
+      gameId: gameId ?? this.gameId,
     );
   }
 
   int get memberCount => 1 + participants.length;
 
   List<PartyMemberData> get allMembers => [owner, ...participants];
+}
+
+class GameSessionData {
+  final String gameId;
+  final String partyId;
+  final String status;
+  final DateTime? startAt;
+  final DateTime? endAt;
+  final DateTime? freezeUntil;
+  final int durationMinutes;
+
+  const GameSessionData({
+    required this.gameId,
+    required this.partyId,
+    required this.status,
+    required this.startAt,
+    required this.endAt,
+    required this.freezeUntil,
+    required this.durationMinutes,
+  });
+
+  factory GameSessionData.fromDoc(
+    DocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final data = doc.data() ?? <String, dynamic>{};
+    final startAt = (data['startAt'] as Timestamp?)?.toDate();
+    final endAt = (data['endAt'] as Timestamp?)?.toDate();
+    final freezeUntil = (data['freezeUntil'] as Timestamp?)?.toDate();
+    return GameSessionData(
+      gameId: data['gameId'] as String? ?? doc.id,
+      partyId: data['partyId'] as String? ?? '',
+      status: data['status'] as String? ?? 'PREPARE',
+      startAt: startAt,
+      endAt: endAt,
+      freezeUntil: freezeUntil,
+      durationMinutes: data['durationMinutes'] as int? ?? 15,
+    );
+  }
 }
 
 class PartyService {
@@ -212,18 +259,48 @@ class PartyService {
 
   Stream<PartyLobbyData?> watchPartyLobby(String partyId) {
     final docRef = _parties.doc(partyId);
-    return docRef.snapshots().asyncExpand((partySnap) {
-      if (!partySnap.exists) {
-        return Stream.value(null);
+
+    // Emit whenever EITHER party doc or members change, using the latest of both.
+    return Stream.multi((controller) {
+      DocumentSnapshot<Map<String, dynamic>>? latestParty;
+      List<QueryDocumentSnapshot<Map<String, dynamic>>> latestMembers = const [];
+
+      void emitIfReady() {
+        final partySnap = latestParty;
+        if (partySnap == null || !partySnap.exists) {
+          controller.add(null);
+          return;
+        }
+        controller.add(_partyLobbyFromSnapshots(partySnap, latestMembers));
       }
-      return docRef
+
+      final subs = <StreamSubscription<dynamic>>[];
+      subs.add(docRef.snapshots().listen((partySnap) {
+        latestParty = partySnap;
+        emitIfReady();
+      }));
+      subs.add(docRef
           .collection('members')
           .orderBy('joinedAt', descending: false)
           .snapshots()
-          .map(
-            (memberSnap) =>
-                _partyLobbyFromSnapshots(partySnap, memberSnap.docs),
-          );
+          .listen((memberSnap) {
+        latestMembers = memberSnap.docs;
+        emitIfReady();
+      }));
+
+      controller.onCancel = () {
+        for (final s in subs) {
+          s.cancel();
+        }
+      };
+    });
+  }
+
+  Stream<GameSessionData?> watchGameSession(String gameId) {
+    final docRef = _firestore.collection('gameSessions').doc(gameId);
+    return docRef.snapshots().map((snap) {
+      if (!snap.exists) return null;
+      return GameSessionData.fromDoc(snap);
     });
   }
 
@@ -401,6 +478,7 @@ class PartyService {
       ),
       participants: const [],
       durationMinutes: durationMinutes,
+      status: 'WAITING', // ★ここを追加しました
     );
   }
 
@@ -413,7 +491,52 @@ class PartyService {
         .get();
     return _partyLobbyFromSnapshots(partyDoc, membersSnap.docs);
   }
+  Future<String> startGame(PartyLobbyData lobby) async {
+    final batch = _firestore.batch();
 
+    // 1. gameSessions ドキュメントを作成 (DB定義書 2.3)
+    final gameRef = _firestore.collection('gameSessions').doc();
+    final gameId = gameRef.id;
+
+    batch.set(gameRef, {
+      'gameId': gameId,
+      'partyId': lobby.partyId,
+      'status': 'PREPARE',
+      'startAt': FieldValue.serverTimestamp(),
+      'freezeUntil': Timestamp.fromDate(
+        DateTime.now().add(const Duration(seconds: 30)),
+      ),
+      'durationMinutes': lobby.durationMinutes,
+      // area情報などはlobbyから取得して設定してください
+      'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+
+    // 2. 参加者を gameSessions/players にコピー
+    for (final member in lobby.allMembers) {
+      final playerRef = gameRef.collection('players').doc();
+      batch.set(playerRef, {
+        'playerId': playerRef.id,
+        'userId': member.userId,
+        'role': member.role.code,
+        'status': 'ACTIVE',
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    }
+
+    // 3. parties の status を IN_PROGRESS に更新し gameId を紐付け
+    // これにより StreamBuilder が反応して全員遷移する
+    final partyRef = _parties.doc(lobby.partyId);
+    batch.update(partyRef, {
+      'status': 'IN_PROGRESS',
+      'gameId': gameId,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+
+    await batch.commit();
+
+    return gameId;
+  }
   PartyLobbyData _partyLobbyFromSnapshots(
     DocumentSnapshot<Map<String, dynamic>> partyDoc,
     List<QueryDocumentSnapshot<Map<String, dynamic>>> memberDocs,
@@ -432,12 +555,16 @@ class PartyService {
     final participants =
         members.where((m) => m.userId != ownerMember.userId).toList();
     final duration = data['durationMinutes'] as int? ?? 15;
+    final status = data['status'] as String? ?? 'WAITING';
+    final gameId = data['gameId'] as String?;
     return PartyLobbyData(
       partyId: partyDoc.id,
       inviteCode: data['inviteCode'] as String? ?? '------',
       owner: ownerMember,
       participants: participants,
       durationMinutes: duration,
+      status: status,
+      gameId: gameId,
     );
   }
 

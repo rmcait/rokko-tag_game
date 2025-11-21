@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../../../data/services/party_service.dart';
 import 'room_game_page.dart';
-
+import '../../routes.dart';
 class RoomLobbyPageArgs {
   final PartyLobbyData lobby;
   final String currentUserId;
@@ -35,6 +35,10 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
   bool _isStartingGame = false;
   PartyLobbyData? _latestLobby;
   bool _durationPromptScheduled = false;
+  bool _hasNavigatedToGame = false;
+  bool _roleRevealShown = false;
+  
+  
 
   @override
   Widget build(BuildContext context) {
@@ -68,9 +72,40 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
               }
               _latestLobby = lobby;
               _maybeShowDurationPrompt(lobby);
+              // ★★★ 全員自動遷移ロジック ★★★
+              // ステータスが IN_PROGRESS になり、まだ遷移していない場合
+              if (lobby.status == 'IN_PROGRESS' && !_hasNavigatedToGame) {
+                _hasNavigatedToGame = true;
+                // 描画完了後に遷移を実行
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  Navigator.of(context).pushReplacementNamed(
+                    AppRoutes.roomGame, // AppRoutesを使用
+                    arguments: RoomGamePageArgs(
+                      lobby: lobby,
+                      currentUserId: widget.args.currentUserId,
+                    ),
+                  );
+                });
+              }
               final members = lobby.allMembers;
               final currentMember =
                   _findMemberById(members, widget.args.currentUserId);
+              final rolesAssigned = members.isNotEmpty &&
+                  members.every(
+                    (m) => m.role != PartyMemberRole.pending,
+                  );
+
+              // 役割未確定なら次回の割り当てで再表示できるようフラグを戻す。
+              if (!rolesAssigned) {
+                _roleRevealShown = false;
+              }
+
+              if (rolesAssigned && !_roleRevealShown && currentMember != null) {
+                _roleRevealShown = true;
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  _openRoleReveal(lobby, currentMember);
+                });
+              }
               return Padding(
                 padding: const EdgeInsets.all(24),
                 child: _LobbyLayout(
@@ -79,10 +114,7 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
                   currentMember: currentMember,
                   isOwner: lobby.owner.userId == widget.args.currentUserId,
                   isAssigning: _isAssigning,
-                  rolesAssigned: members.isNotEmpty &&
-                      members.every(
-                        (m) => m.role != PartyMemberRole.pending,
-                      ),
+                  rolesAssigned: rolesAssigned,
                   onAssignRoles: currentMember == null
                       ? null
                       : () => _handleAssignRoles(lobby, currentMember),
@@ -173,17 +205,20 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
     PartyMemberData currentMember,
   ) async {
     if (_isAssigning) return;
-    setState(() => _isAssigning = true);
+    setState(() {
+      _isAssigning = true;
+      // 新しい割り当ての結果を全員に見せるためリセットする。
+      _roleRevealShown = false;
+    });
     try {
       await _partyService.assignRolesRandomly(lobby.partyId);
       final updated =
           await _partyService.fetchPartyLobbyById(lobby.partyId) ?? lobby;
-      if (!mounted) return;
-      final refreshedMember = updated.allMembers.firstWhere(
-        (m) => m.userId == currentMember.userId,
-        orElse: () => currentMember,
-      );
-      await _openRoleReveal(updated, refreshedMember);
+      if (mounted) {
+        setState(() {
+          _latestLobby = updated;
+        });
+      }
     } on PartyJoinException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -220,20 +255,33 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
   Future<void> _startGame(PartyLobbyData lobby) async {
     if (_isStartingGame) return;
     setState(() => _isStartingGame = true);
+    
     try {
       if (!mounted) return;
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => RoomGamePage(
-            args: RoomGamePageArgs(
-              lobby: lobby,
-              currentUserId: widget.args.currentUserId,
-            ),
-          ),
-        ),
+      final gameId = await _partyService.startGame(lobby);
+
+      // ホストも即座にゲーム画面へ遷移させ、二重操作を防ぐ。
+      final navLobby = (_latestLobby ?? lobby).copyWith(
+        status: 'IN_PROGRESS',
+        gameId: gameId,
       );
-    } finally {
+      _hasNavigatedToGame = true;
+      _isStartingGame = false;
       if (mounted) {
+        Navigator.of(context).pushReplacementNamed(
+          AppRoutes.roomGame,
+          arguments: RoomGamePageArgs(
+            lobby: navLobby,
+            currentUserId: widget.args.currentUserId,
+          ),
+        );
+      }
+
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+           SnackBar(content: Text('ゲーム開始に失敗しました: $e')),
+        );
         setState(() => _isStartingGame = false);
       }
     }

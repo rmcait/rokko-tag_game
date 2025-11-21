@@ -6,7 +6,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../../data/services/party_service.dart';
 import '../../routes.dart';
-
+import 'package:ntp/ntp.dart'; // ★追加
 class RoomGamePageArgs {
   final PartyLobbyData lobby;
   final String currentUserId;
@@ -28,17 +28,19 @@ class RoomGamePage extends StatefulWidget {
 
 class _RoomGamePageState extends State<RoomGamePage> {
   final PartyService _partyService = PartyService();
-  late final PartyMemberRole _role;
-  late final _RolePalette _palette;
+  late PartyMemberRole _role;
+  late _RolePalette _palette;
+  PartyLobbyData? _latestLobby;
 
-  Timer? _countdownTimer;
-  int _countdown = 3;
+  Timer? _ticker;
+  GameSessionData? _gameSession;
+  StreamSubscription<GameSessionData?>? _gameSessionSub;
+  int _countdown = 0;
   bool _showGo = false;
 
   int _capturedCount = 0;
   final List<String> _items = [];
   late int _remainingSeconds;
-  Timer? _gameTimer;
   String? _initErrorMessage;
 
   GoogleMapController? _mapController;
@@ -47,10 +49,12 @@ class _RoomGamePageState extends State<RoomGamePage> {
   String? _locationError;
   final Set<Marker> _markers = {};
   Set<Polygon> _fieldPolygons = {};
-
+  int _ntpOffset = 0;
   @override
   void initState() {
     super.initState();
+    _latestLobby = widget.args.lobby;
+    _syncTime();
     try {
       _role = _resolveRole();
     } catch (e, s) {
@@ -64,62 +68,139 @@ class _RoomGamePageState extends State<RoomGamePage> {
     _palette = _RolePalette.of(_role);
     _remainingSeconds = widget.args.lobby.durationMinutes * 60;
     if (_initErrorMessage == null) {
-      _startCountdown();
+      _startTicker();
+      _listenToGameSession();
       _loadCurrentLocation();
       _loadFieldPolygon();
+      _refreshLobbyRole();
+    }
+  }
+  // ★追加: NTP同期メソッド
+  Future<void> _syncTime() async {
+    try {
+      // インターネット経由で正確な時刻との差分を取得
+      _ntpOffset = await NTP.getNtpOffset(localTime: DateTime.now());
+    } catch (e) {
+      debugPrint('NTP Sync failed: $e');
+      // 失敗してもエラーにはせず、端末時間(_ntpOffset=0)で動かす
     }
   }
 
+  // ★追加: 補正済みの「今」を取得するゲッター
+  DateTime get _now => DateTime.now().add(Duration(milliseconds: _ntpOffset));
   @override
   void dispose() {
-    _countdownTimer?.cancel();
-    _gameTimer?.cancel();
+    _ticker?.cancel();
+    _gameSessionSub?.cancel();
     _mapController?.dispose();
     super.dispose();
   }
 
   PartyMemberRole _resolveRole() {
-    final members = widget.args.lobby.allMembers;
+    final members = _latestLobby?.allMembers ?? widget.args.lobby.allMembers;
     final me = members.firstWhere(
       (m) => m.userId == widget.args.currentUserId,
     );
     return me.role;
   }
 
-  void _startCountdown() {
-    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!mounted) return;
-      if (_countdown > 1) {
-        setState(() => _countdown -= 1);
-        return;
-      }
-      timer.cancel();
+  Future<void> _refreshLobbyRole() async {
+    try {
+      final refreshed =
+          await _partyService.fetchPartyLobbyById(widget.args.lobby.partyId);
+      if (!mounted || refreshed == null) return;
+      final members = refreshed.allMembers;
+      final me = members.where((m) => m.userId == widget.args.currentUserId).toList();
+      if (me.isEmpty) return;
+      final newRole = me.first.role;
       setState(() {
-        _countdown = 0;
-        _showGo = true;
-      });
-      _startGameTimer();
-      Future.delayed(const Duration(milliseconds: 800), () {
-        if (mounted) {
-          setState(() => _showGo = false);
+        _latestLobby = refreshed;
+        if (newRole != _role) {
+          _role = newRole;
+          _palette = _RolePalette.of(_role);
         }
       });
-    });
+    } catch (e, s) {
+      debugPrint('Failed to refresh lobby for role: $e\n$s');
+    }
   }
 
-  void _startGameTimer() {
-    _gameTimer?.cancel();
-    _gameTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+  void _startTicker() {
+    _ticker?.cancel();
+    _ticker = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _updateTimeFromSession(),
+    );
+  }
+
+  void _listenToGameSession() {
+    final gameId = widget.args.lobby.gameId;
+    if (gameId == null) {
+      debugPrint('No gameId on lobby; cannot sync time.');
+      return;
+    }
+    _gameSessionSub = _partyService.watchGameSession(gameId).listen((session) {
       if (!mounted) return;
-      setState(() {
-        _remainingSeconds = (_remainingSeconds - 1).clamp(0, 99999);
-      });
-      if (_remainingSeconds == 0) {
-        timer.cancel();
-      }
+      setState(() => _gameSession = session);
+      _updateTimeFromSession();
     });
   }
 
+  // ★修正: 時間計算ロジック
+  void _updateTimeFromSession() {
+    final session = _gameSession;
+    if (session == null) return;
+
+    // ★修正: 補正済みの現在時刻を使う
+    final now = _now;
+
+    var remaining = _remainingSeconds;
+    final startAt = session.startAt;
+
+    if (startAt != null) {
+      // ゲーム終了予定時刻の計算
+      final computedEnd = session.endAt ?? 
+          startAt.add(Duration(minutes: session.durationMinutes));
+      
+      remaining = computedEnd.difference(now).inSeconds;
+      final maxSeconds = session.durationMinutes * 60;
+      remaining = remaining.clamp(0, maxSeconds);
+    }
+
+    // カウントダウン（鬼の待機時間）の計算
+    var countdown = 0;
+    var showGo = _showGo;
+
+    // ★修正: freezeUntil はDBの値を使わず、startAt + 30秒 で計算する
+    // これによりホストの時計ズレの影響を排除できる
+    if (startAt != null) {
+      final freezeUntilCorrected = startAt.add(const Duration(seconds: 3));
+      final diff = freezeUntilCorrected.difference(now).inSeconds;
+
+      if (diff > 0) {
+        countdown = diff;
+        showGo = false;
+      } else {
+        // 0になった瞬間の "GO!" 表示制御
+        if (_countdown > 0 && diff <= 0) {
+          showGo = true;
+          Future.delayed(const Duration(milliseconds: 800), () {
+            if (mounted) {
+              setState(() => _showGo = false);
+            }
+          });
+        }
+        countdown = 0;
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _remainingSeconds = remaining;
+      _countdown = countdown;
+      _showGo = showGo;
+    });
+  }
   Future<void> _loadCurrentLocation() async {
     try {
       final serviceEnabled = await Geolocator.isLocationServiceEnabled();
