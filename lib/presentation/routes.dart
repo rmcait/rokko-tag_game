@@ -8,6 +8,8 @@ import 'pages/room/room_join_page.dart';
 import 'pages/room/room_game_page.dart';
 import 'pages/room/room_lobby_page.dart';
 
+
+
 class AppRoutes {
   static const home = '/';
   static const login = '/login';
@@ -72,16 +74,17 @@ class AppRouter {
                 lobby: const PartyLobbyData(
                   partyId: 'local',
                   inviteCode: '------',
-                  owner: const PartyMemberData(
+                  owner: PartyMemberData(
                     userId: 'owner',
                     name: 'Owner',
                     role: PartyMemberRole.pending,
                   ),
-                  participants: const [],
+                  participants: [],
                   durationMinutes: 15,
                   status: 'IN_PROGRESS', // ★追加
                 ),
                 currentUserId: 'owner',
+                gameId: 'local-game',
               );
         return MaterialPageRoute<void>(
           builder: (_) => RoomGamePage(args: gameArgs),

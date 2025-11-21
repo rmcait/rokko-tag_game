@@ -501,7 +501,7 @@ class PartyService {
     batch.set(gameRef, {
       'gameId': gameId,
       'partyId': lobby.partyId,
-      'status': 'PREPARE',
+      'status': 'ACTIVE',
       'startAt': FieldValue.serverTimestamp(),
       'freezeUntil': Timestamp.fromDate(
         DateTime.now().add(const Duration(seconds: 30)),
@@ -536,6 +536,26 @@ class PartyService {
     await batch.commit();
 
     return gameId;
+  }
+
+  Future<void> updateGameStatus({
+    required String gameId,
+    required String status,
+    String? partyId,
+  }) async {
+    final batch = _firestore.batch();
+    final gameRef = _firestore.collection('gameSessions').doc(gameId);
+    batch.update(gameRef, {
+      'status': status,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+    if (partyId != null) {
+      batch.update(_parties.doc(partyId), {
+        'status': status == 'ACTIVE' ? 'IN_PROGRESS' : status == 'ABORTED' ? 'CANCELLED' : status,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    }
+    await batch.commit();
   }
   PartyLobbyData _partyLobbyFromSnapshots(
     DocumentSnapshot<Map<String, dynamic>> partyDoc,

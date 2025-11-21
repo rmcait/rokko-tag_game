@@ -73,8 +73,11 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
               _latestLobby = lobby;
               _maybeShowDurationPrompt(lobby);
               // ★★★ 全員自動遷移ロジック ★★★
-              // ステータスが IN_PROGRESS になり、まだ遷移していない場合
-              if (lobby.status == 'IN_PROGRESS' && !_hasNavigatedToGame) {
+              // ステータスが IN_PROGRESS になり、gameId が確定しており、まだ遷移していない場合
+              if (lobby.status == 'IN_PROGRESS' &&
+                  lobby.gameId != null &&
+                  lobby.gameId!.isNotEmpty &&
+                  !_hasNavigatedToGame) {
                 _hasNavigatedToGame = true;
                 // 描画完了後に遷移を実行
                 WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -83,6 +86,7 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
                     arguments: RoomGamePageArgs(
                       lobby: lobby,
                       currentUserId: widget.args.currentUserId,
+                      gameId: lobby.gameId!,
                     ),
                   );
                 });
@@ -114,7 +118,8 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
                   currentMember: currentMember,
                   isOwner: lobby.owner.userId == widget.args.currentUserId,
                   isAssigning: _isAssigning,
-                  rolesAssigned: rolesAssigned,
+                  rolesAssigned: members.isNotEmpty &&
+                      members.every((m) => m.role != PartyMemberRole.pending),
                   onAssignRoles: currentMember == null
                       ? null
                       : () => _handleAssignRoles(lobby, currentMember),
@@ -123,9 +128,8 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
                       : () => _openRoleReveal(lobby, currentMember),
                   onCopyCode: () => _copyRoomCode(lobby.inviteCode),
                   isStartingGame: _isStartingGame,
-                  onStartGame: lobby.owner.userId == widget.args.currentUserId
-                      ? () => _startGame(lobby)
-                      : null,
+                  // ★ ここを変更：全員 onStartGame を持つようにする
+                  onStartGame: () => _startGame(lobby),
                   onEditDuration: (lobby.owner.userId == widget.args.currentUserId &&
                           members.every((m) => m.role == PartyMemberRole.pending))
                       ? () => _showDurationPicker(lobby)
@@ -253,14 +257,21 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
   }
 
   Future<void> _startGame(PartyLobbyData lobby) async {
+    if (lobby.owner.userId != widget.args.currentUserId) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('ホストだけが開始できます')),
+        );
+      }
+      return;
+    }
     if (_isStartingGame) return;
     setState(() => _isStartingGame = true);
-    
+
     try {
       if (!mounted) return;
       final gameId = await _partyService.startGame(lobby);
 
-      // ホストも即座にゲーム画面へ遷移させ、二重操作を防ぐ。
       final navLobby = (_latestLobby ?? lobby).copyWith(
         status: 'IN_PROGRESS',
         gameId: gameId,
@@ -273,14 +284,14 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
           arguments: RoomGamePageArgs(
             lobby: navLobby,
             currentUserId: widget.args.currentUserId,
+            gameId: gameId,
           ),
         );
       }
-
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-           SnackBar(content: Text('ゲーム開始に失敗しました: $e')),
+          SnackBar(content: Text('ゲーム開始に失敗しました: $e')),
         );
         setState(() => _isStartingGame = false);
       }
