@@ -59,7 +59,11 @@ class _RoomGamePageState extends State<RoomGamePage> {
   GeoPoint? _myLastGeo;
   bool _alreadyNotifiedCaught = false;
 
+  bool _canCatch = false;
+  final List<DocumentReference<Map<String, dynamic>>> _nearRunnerRefs = [];
+
   final List<_PlayerInfo> _players = [];
+  
 
   late PartyMemberRole _role;
   late _RolePalette _palette;
@@ -166,53 +170,67 @@ class _RoomGamePageState extends State<RoomGamePage> {
       _checkFieldBoundary(current);
     });
   }
-  void _startPlayersWatch() {
-  final gameId = widget.args.lobby.gameId;
-  if (gameId == null || gameId.isEmpty) return;
+    void _startPlayersWatch() {
+    final gameId = widget.args.lobby.gameId;
+    if (gameId == null || gameId.isEmpty) return;
 
-  _playersSub = FirebaseFirestore.instance
-      .collection('gameSessions')
-      .doc(gameId)
-      .collection('players')
-      .snapshots()
-      .listen((snapshot) async {
+    _playersSub = FirebaseFirestore.instance
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('players')
+        .snapshots()
+        .listen((snapshot) async {
       debugPrint('[PLAYERS] gameId=$gameId docs=${snapshot.docs.length}');
-    final players = <_PlayerInfo>[];
+      final players = <_PlayerInfo>[];
 
-    GeoPoint? myGeo;
-    String? myRole;
-    bool myCaught = false;
+      GeoPoint? myGeo;
+      String? myRole;
+      bool myCaught = false;
 
-    for (final doc in snapshot.docs) {
-      final data = doc.data();
-      final geo = data['lastLocation'] as GeoPoint?;
-      if (geo == null) continue;
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final geo = data['lastLocation'] as GeoPoint?;
+        if (geo == null) continue;
 
-      final role = data['role'] as String? ?? 'PENDING';
-      final inside = (data['inside'] as bool?) ?? false;
-      final caught = (data['caught'] as bool?) ?? false;
-      final isMe = doc.id == widget.args.currentUserId;
-      final name =
-          data['displayName'] as String? ?? 'Player ${doc.id.substring(0, 4)}';
+        final role = data['role'] as String? ?? 'PENDING';
+        final inside = (data['inside'] as bool?) ?? false;
+        final caught = (data['caught'] as bool?) ?? false;
+        final isMe = doc.id == widget.args.currentUserId;
+        final name =
+            data['displayName'] as String? ?? 'Player ${doc.id.substring(0, 4)}';
 
-      if (isMe) {
-        myGeo = geo;
-        myRole = role;
-        myCaught = caught;
+        if (isMe) {
+          myGeo = geo;
+          myRole = role;
+          myCaught = caught;
+        }
+
+        players.add(
+          _PlayerInfo(
+            id: doc.id,
+            name: name,
+            position: LatLng(geo.latitude, geo.longitude),
+            role: role,
+            isMe: isMe,
+            inside: inside,
+            caught: caught,
+          ),
+        );
       }
 
-      players.add(
-        _PlayerInfo(
-          id: doc.id,
-          name: name,
-          position: LatLng(geo.latitude, geo.longitude),
-          role: role,
-          isMe: isMe,
-          inside: inside,
-          caught: caught,
-        ),
-      );
+      final captured = players.where((p) => p.caught).length;
+
+    // ★ 逃走側が捕まったときの通知（1回だけ）
+    if (myRole == 'RUNNER' && myCaught && !_alreadyNotifiedCaught) {
+      _alreadyNotifiedCaught = true;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('捕まってしまいました…！')),
+        );
+      }
     }
+
+    if (!mounted) return;
 
     // 状態更新
     setState(() {
@@ -221,20 +239,117 @@ class _RoomGamePageState extends State<RoomGamePage> {
         ..addAll(players);
       _myLastGeo = myGeo;
       _myRoleCode = myRole;
+      _capturedCount = captured;
     });
 
-    // マーカー描画もここで更新
+    // マーカー描画を更新
     _updateMarkersFromPlayers(players);
 
-    // タッチ判定ロジック
-    _handleTagLogic(
+    // ★ 鬼のときだけ、近くに捕まえられる相手がいるか判定
+    _updateCatchAvailability(
       myGeo: myGeo,
       myRole: myRole,
-      myCaught: myCaught,
       snapshot: snapshot,
-      );
+    );
     });
   }
+    void _updateCatchAvailability({
+    required GeoPoint? myGeo,
+    required String? myRole,
+    required QuerySnapshot<Map<String, dynamic>> snapshot,
+  }) {
+    // 自分の位置 or 役割が不明、もしくは鬼じゃない → キャッチ不可
+    if (myGeo == null || myRole != 'TAGGER') {
+      if (mounted) {
+        setState(() {
+          _canCatch = false;
+          _nearRunnerRefs.clear();
+        });
+      }
+
+    debugPrint('[CATCH] not tagger or no position: myRole=$myRole myGeo=$myGeo');
+    
+      return;
+    }
+
+    const touchThresholdMeters = 8.0; // ★ 距離はここで調整（今は8m）
+
+    final nearRunners = <DocumentReference<Map<String, dynamic>>>[];
+
+    for (final doc in snapshot.docs) {
+      if (doc.id == widget.args.currentUserId) continue;
+
+      final data = doc.data();
+      final role = data['role'] as String?;
+      if (role != 'RUNNER') continue;
+
+      final caught = (data['caught'] as bool?) ?? false;
+      if (caught) continue;
+
+      final geo = data['lastLocation'] as GeoPoint?;
+      if (geo == null) continue;
+
+      final distance = Geolocator.distanceBetween(
+        myGeo.latitude,
+        myGeo.longitude,
+        geo.latitude,
+        geo.longitude,
+      );
+
+    debugPrint('[CATCH] candidate=${doc.id} role=$role distance=$distance caught=$caught');
+
+      if (distance <= touchThresholdMeters) {
+        nearRunners.add(doc.reference);
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _canCatch = nearRunners.isNotEmpty;
+        _nearRunnerRefs
+          ..clear()
+          ..addAll(nearRunners);
+      });
+    }
+    debugPrint('[CATCH] canCatch=$_canCatch nearRunners=${nearRunners.length}');
+  }
+
+    Future<void> _onCatchPressed() async {
+    // 念のためチェック
+    if (_myRoleCode != 'TAGGER') return;
+
+    if (_nearRunnerRefs.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('近くに捕まえられる相手がいません')),
+        );
+      }
+      return;
+    }
+
+    // 近くにいる RUNNER 全員を捕まえたことにする
+    for (final ref in _nearRunnerRefs) {
+      await ref.update({
+        'caught': true,
+        'caughtAt': FieldValue.serverTimestamp(),
+        'caughtBy': widget.args.currentUserId,
+      });
+    }
+
+    if (mounted) {
+      setState(() {
+        _canCatch = false;
+        _nearRunnerRefs.clear();
+      });
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('捕まえました！')),
+      );
+    }
+  }
+
   void _updateMarkersFromPlayers(List<_PlayerInfo> players) {
     final newMarkers = <Marker>{};
 
@@ -268,59 +383,59 @@ class _RoomGamePageState extends State<RoomGamePage> {
         ..addAll(newMarkers);
     });
   }
-Future<void> _handleTagLogic({
-  required GeoPoint? myGeo,
-  required String? myRole,
-  required bool myCaught,
-  required QuerySnapshot<Map<String, dynamic>> snapshot,
-}) async {
-  if (myGeo == null || myRole == null) return;
+// Future<void> _handleTagLogic({
+//   required GeoPoint? myGeo,
+//   required String? myRole,
+//   required bool myCaught,
+//   required QuerySnapshot<Map<String, dynamic>> snapshot,
+// }) async {
+//   if (myGeo == null || myRole == null) return;
 
-  // 逃走側が捕まったときの通知（1回だけ）
-  if (myRole == 'RUNNER' && myCaught && !_alreadyNotifiedCaught) {
-    _alreadyNotifiedCaught = true;
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('捕まってしまいました…！')),
-      );
-    }
-  }
+//   // 逃走側が捕まったときの通知（1回だけ）
+//   if (myRole == 'RUNNER' && myCaught && !_alreadyNotifiedCaught) {
+//     _alreadyNotifiedCaught = true;
+//     if (mounted) {
+//       ScaffoldMessenger.of(context).showSnackBar(
+//         const SnackBar(content: Text('捕まってしまいました…！')),
+//       );
+//     }
+//   }
 
-  // 鬼以外はここで終了
-  if (myRole != 'TAGGER') return;
+//   // 鬼以外はここで終了
+//   if (myRole != 'TAGGER') return;
 
-  const touchThresholdMeters = 8.0;
+//   const touchThresholdMeters = 8.0;
 
-  for (final doc in snapshot.docs) {
-    if (doc.id == widget.args.currentUserId) continue;
+//   for (final doc in snapshot.docs) {
+//     if (doc.id == widget.args.currentUserId) continue;
 
-    final data = doc.data();
-    final role = data['role'] as String?;
-    if (role != 'RUNNER') continue;
+//     final data = doc.data();
+//     final role = data['role'] as String?;
+//     if (role != 'RUNNER') continue;
 
-    final caught = (data['caught'] as bool?) ?? false;
-    if (caught) continue;
+//     final caught = (data['caught'] as bool?) ?? false;
+//     if (caught) continue;
 
-    final geo = data['lastLocation'] as GeoPoint?;
-    if (geo == null) continue;
+//     final geo = data['lastLocation'] as GeoPoint?;
+//     if (geo == null) continue;
 
-    final distance = Geolocator.distanceBetween(
-      myGeo.latitude,
-      myGeo.longitude,
-      geo.latitude,
-      geo.longitude,
-    );
+//     final distance = Geolocator.distanceBetween(
+//       myGeo.latitude,
+//       myGeo.longitude,
+//       geo.latitude,
+//       geo.longitude,
+//     );
 
-    if (distance <= touchThresholdMeters) {
-      // ★ 捕まえた！
-      await doc.reference.update({
-        'caught': true,
-        'caughtAt': FieldValue.serverTimestamp(),
-        'caughtBy': widget.args.currentUserId,
-      });
-    }
-  }
-}
+//     if (distance <= touchThresholdMeters) {
+//       // ★ 捕まえた！
+//       await doc.reference.update({
+//         'caught': true,
+//         'caughtAt': FieldValue.serverTimestamp(),
+//         'caughtBy': widget.args.currentUserId,
+//       });
+//     }
+//   }
+// }
    // ★ プレイヤー名の吹き出しを作る
   Future<List<Widget>> _buildPlayerBubbles() async {
     if (_mapController == null) return [];
@@ -742,11 +857,8 @@ Future<void> _handleTagLogic({
                           const SizedBox(height: 12),
                           _CatchButton(
                             accent: _palette.accent,
-                            onPressed: () {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('捕まえ処理は未実装です')),
-                              );
-                            },
+                            enabled: _canCatch,     // ★ 近くに相手がいるときだけ有効
+                            onPressed: _onCatchPressed,
                           ),
                         ],
                       ],
@@ -763,10 +875,12 @@ Future<void> _handleTagLogic({
 class _CatchButton extends StatelessWidget {
   final Color accent;
   final VoidCallback onPressed;
+  final bool enabled;
 
   const _CatchButton({
     required this.accent,
     required this.onPressed,
+    required this.enabled,
   });
 
   @override
@@ -778,7 +892,8 @@ class _CatchButton extends StatelessWidget {
           backgroundColor: accent,
           padding: const EdgeInsets.symmetric(vertical: 16),
         ),
-        onPressed: onPressed,
+        // enabled = false のときは null にして無効化
+        onPressed: enabled ? onPressed : null,
         child: const Text(
           'Catch',
           style: TextStyle(
