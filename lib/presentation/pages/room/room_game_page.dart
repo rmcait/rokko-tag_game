@@ -240,10 +240,10 @@ class _RoomGamePageState extends State<RoomGamePage> {
 
     for (final p in players) {
       // 色をロールで分ける
+      if (p.isMe) continue;
+
       double hue;
-      if (p.isMe) {
-        hue = BitmapDescriptor.hueAzure;
-      } else if (p.role == 'TAGGER') {
+      if (p.role == 'TAGGER') {
         hue = BitmapDescriptor.hueRed;
       } else {
         hue = BitmapDescriptor.hueOrange;
@@ -526,17 +526,17 @@ Future<void> _handleTagLogic({
         _currentLatLng = latLng;
         _isLocating = false;
         _locationError = null;
-        _markers
-          ..clear()
-          ..add(
-            Marker(
-              markerId: const MarkerId('me'),
-              position: latLng,
-              icon: BitmapDescriptor.defaultMarkerWithHue(
-                BitmapDescriptor.hueAzure,
-              ),
-            ),
-          );
+        // _markers
+        //   ..clear()
+        //   ..add(
+        //     Marker(
+        //       markerId: const MarkerId('me'),
+        //       position: latLng,
+        //       icon: BitmapDescriptor.defaultMarkerWithHue(
+        //         BitmapDescriptor.hueAzure,
+        //       ),
+        //     ),
+        //   );
       });
 
       _mapController?.animateCamera(
