@@ -8,7 +8,7 @@ import '../../../data/services/party_service.dart';
 import '../../routes.dart';
 import 'game_over_page.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:ntp/ntp.dart'; // ★追加
+import 'package:ntp/ntp.dart'; 
 import 'package:flutter/foundation.dart'; // ★追加：kDebugMode でデバッグ時だけボタンを出す
 import 'package:turf/turf.dart' as turf;
 class RoomGamePageArgs {
