@@ -38,17 +38,29 @@ class _RoomGamePageState extends State<RoomGamePage> {
   bool _showGo = false;
 
   int _capturedCount = 0;
-  final List<String> _items = [];
   final Map<String, GameItem> _visibleItems = {};
+  List<PlayerItem> _playerItems = const [];
+  List<PlayerLocation> _taggerLocations = const [];
   late int _remainingSeconds;
   Timer? _gameTimer;
   String? _initErrorMessage;
   StreamSubscription<List<GameItem>>? _itemsSub;
+  StreamSubscription<List<PlayerItem>>? _playerItemsSub;
+  StreamSubscription<List<PlayerLocation>>? _taggerLocationsSub;
   String? _playerId;
   bool _isPickingItem = false;
+  bool _isUsingSeeTagger = false;
+  bool _isFreezingTagger = false;
+  bool _isUsingTaggerAbility = false;
+  Timer? _taggerMarkerTimer;
+  Timer? _runnerMarkerTimer;
+  StreamSubscription<Position>? _taggerPositionSub;
 
   GoogleMapController? _mapController;
   LatLng? _currentLatLng;
+  LatLng? _lastGaugeLatLng;
+  double _gaugePercent = 0;
+  double _gaugeDistanceBuffer = 0;
   bool _isLocating = true;
   String? _locationError;
   final Set<Marker> _markers = {};
@@ -77,6 +89,9 @@ class _RoomGamePageState extends State<RoomGamePage> {
       if (gameId != null && _role != PartyMemberRole.pending) {
         _fetchPlayerId(gameId);
         _subscribeToGameItems(gameId);
+        if (_role == PartyMemberRole.runner) {
+          _subscribeToTaggerLocations(gameId);
+        }
       }
     }
   }
@@ -87,6 +102,11 @@ class _RoomGamePageState extends State<RoomGamePage> {
     _gameTimer?.cancel();
     _mapController?.dispose();
     _itemsSub?.cancel();
+    _playerItemsSub?.cancel();
+    _taggerLocationsSub?.cancel();
+    _taggerMarkerTimer?.cancel();
+    _runnerMarkerTimer?.cancel();
+    _taggerPositionSub?.cancel();
     super.dispose();
   }
 
@@ -188,18 +208,9 @@ class _RoomGamePageState extends State<RoomGamePage> {
         _currentLatLng = latLng;
         _isLocating = false;
         _locationError = null;
-        _markers
-          ..clear()
-          ..add(
-            Marker(
-              markerId: const MarkerId('me'),
-              position: latLng,
-              icon: BitmapDescriptor.defaultMarkerWithHue(
-                BitmapDescriptor.hueAzure,
-              ),
-            ),
-          );
+        _updatePlayerMarker(latLng);
       });
+      _maybeStartTaggerTracking(latLng);
 
       _mapController?.animateCamera(
         CameraUpdate.newLatLngZoom(latLng, 17),
@@ -264,14 +275,6 @@ class _RoomGamePageState extends State<RoomGamePage> {
           ..clear()
           ..addAll(picked);
 
-        if (_role == PartyMemberRole.runner) {
-          _items
-            ..clear()
-            ..addAll(picked.keys);
-        } else {
-          _items.clear();
-        }
-
         _refreshItemMarkers();
       });
     });
@@ -285,6 +288,9 @@ class _RoomGamePageState extends State<RoomGamePage> {
       setState(() {
         _playerId = playerId;
       });
+      if (playerId != null) {
+        _subscribeToPlayerItems(gameId, playerId);
+      }
     } catch (e, s) {
       debugPrint('Failed to fetch playerId: $e\n$s');
       if (mounted) {
@@ -304,6 +310,26 @@ class _RoomGamePageState extends State<RoomGamePage> {
     return _playerId;
   }
 
+  void _subscribeToPlayerItems(String gameId, String playerId) {
+    _playerItemsSub?.cancel();
+    _playerItemsSub = _partyService.watchPlayerItems(gameId, playerId).listen((items) {
+      if (!mounted) return;
+      setState(() {
+        _playerItems = items;
+      });
+    });
+  }
+
+  void _subscribeToTaggerLocations(String gameId) {
+    _taggerLocationsSub?.cancel();
+    _taggerLocationsSub = _partyService.watchTaggerLocations(gameId).listen((locations) {
+      if (!mounted) return;
+      setState(() {
+        _taggerLocations = locations;
+      });
+    });
+  }
+
   void _refreshItemMarkers() {
     _markers.removeWhere((m) => m.markerId.value.startsWith('item_'));
     for (final it in _visibleItems.values) {
@@ -315,10 +341,178 @@ class _RoomGamePageState extends State<RoomGamePage> {
           position: pos,
           infoWindow: InfoWindow(title: it.type),
           icon: BitmapDescriptor.defaultMarkerWithHue(_itemHue(it.type)),
-          onTap: () => _onItemMarkerTapped(it),
+          onTap: null,
         ),
       );
     }
+  }
+
+  void _handleItemChipTap(PlayerItem item) {
+    if (_isUsingSeeTagger) return;
+    if (_isFreezingTagger) return;
+    switch (item.type) {
+      case 'FAKE_LOCATION':
+        _showSnack('FAKE_LOCATION は自動で発動します');
+        break;
+      case 'SEE_TAGGER':
+        _useSeeTagger(item);
+        break;
+      case 'FREEZE_TAGGER':
+        _useFreezeTagger(item);
+        break;
+      default:
+        _showSnack('このアイテムの使用はまだできません');
+    }
+  }
+
+  Future<void> _useSeeTagger(PlayerItem item) async {
+    if (_isUsingSeeTagger) return;
+    final gameId = widget.args.gameId;
+    if (gameId == null) {
+      _showSnack('ゲーム情報が見つかりません');
+      return;
+    }
+
+    final playerId = await _ensurePlayerId();
+    if (playerId == null) return;
+
+    setState(() => _isUsingSeeTagger = true);
+    try {
+      final locations = await _partyService.fetchTaggerLocations(gameId);
+      if (!mounted) return;
+      final markerList = <Marker>[];
+      for (final loc in locations) {
+        final pos = loc.latLng;
+        if (pos == null) continue;
+        markerList.add(
+          Marker(
+            markerId: MarkerId('tagger_${loc.playerId}'),
+            position: pos,
+            infoWindow: const InfoWindow(title: '鬼の位置'),
+            icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+          ),
+        );
+      }
+
+      if (markerList.isEmpty) {
+        _showSnack('鬼の位置情報がありません');
+      } else {
+        setState(() {
+          _markers.removeWhere((m) => m.markerId.value.startsWith('tagger_'));
+          _markers.addAll(markerList);
+        });
+        _taggerMarkerTimer?.cancel();
+        _taggerMarkerTimer = Timer(const Duration(seconds: 3), () {
+          if (!mounted) return;
+          setState(() {
+            _markers.removeWhere((m) => m.markerId.value.startsWith('tagger_'));
+          });
+        });
+        _showSnack('鬼の位置を表示中');
+      }
+
+      final consumed = await _partyService.consumePlayerItem(
+        gameId: gameId,
+        playerId: playerId,
+        itemId: item.itemId,
+      );
+      if (!consumed && mounted) {
+        _showSnack('アイテムの消費に失敗しました');
+      }
+    } catch (e, s) {
+      debugPrint('Failed to use SEE_TAGGER: $e\n$s');
+      if (mounted) {
+        _showSnack('鬼の位置を取得できませんでした');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isUsingSeeTagger = false);
+      }
+    }
+  }
+
+  Future<void> _useFreezeTagger(PlayerItem item) async {
+    if (_isFreezingTagger) return;
+    final gameId = widget.args.gameId;
+    if (gameId == null) {
+      _showSnack('ゲーム情報が見つかりません');
+      return;
+    }
+    final playerId = await _ensurePlayerId();
+    if (playerId == null) return;
+    final current = _currentLatLng;
+    if (current == null) {
+      _showSnack('現在位置を取得できていません');
+      return;
+    }
+    final target = _findNearestTaggerWithinMeters(current, 5);
+    if (target == null) {
+      _showSnack('半径5m以内に鬼がいません');
+      return;
+    }
+
+    setState(() => _isFreezingTagger = true);
+    try {
+      final success = await _partyService.freezeTagger(
+        gameId: gameId,
+        targetPlayerId: target.playerId,
+        runnerPlayerId: playerId,
+      );
+      if (!mounted) return;
+      if (!success) {
+        _showSnack('鬼を停止させられませんでした');
+      } else {
+        final consumed = await _partyService.consumePlayerItem(
+          gameId: gameId,
+          playerId: playerId,
+          itemId: item.itemId,
+        );
+        if (!consumed) {
+          _showSnack('アイテムの消費に失敗しました');
+        } else {
+          _showSnack('鬼を5秒間停止させました');
+        }
+      }
+    } catch (e, s) {
+      debugPrint('Failed to use FREEZE_TAGGER: $e\n$s');
+      if (mounted) {
+        _showSnack('鬼を停止させられませんでした');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isFreezingTagger = false);
+      }
+    }
+  }
+
+  PlayerLocation? _findNearestTaggerWithinMeters(LatLng origin, double radiusMeters) {
+    PlayerLocation? closest;
+    var minDistance = double.infinity;
+    for (final loc in _taggerLocations) {
+      final pos = loc.latLng;
+      if (pos == null) continue;
+      final dist = Geolocator.distanceBetween(
+        origin.latitude,
+        origin.longitude,
+        pos.latitude,
+        pos.longitude,
+      );
+      if (dist <= radiusMeters && dist < minDistance) {
+        minDistance = dist;
+        closest = loc;
+      }
+    }
+    return closest;
+  }
+
+  bool _isItemUsable(PlayerItem item) {
+    if (item.type != 'FREEZE_TAGGER') {
+      return true;
+    }
+    final current = _currentLatLng;
+    if (current == null) return false;
+    final target = _findNearestTaggerWithinMeters(current, 5);
+    return target != null;
   }
 
   double _itemHue(String type) {
@@ -466,13 +660,29 @@ class _RoomGamePageState extends State<RoomGamePage> {
                       accent: _palette.accent,
                     ),
                     const Spacer(),
-                    _StatsBar(
-                      accent: _palette.accent,
-                      capturedCount: _capturedCount,
-                      remainingPlayers: remainingPlayers,
-                      items: _items,
-                    ),
                     if (_role == PartyMemberRole.tagger) ...[
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _AbilityGaugeButton(
+                            accent: _palette.accent,
+                            percent: _gaugePercent,
+                            isReady: _gaugePercent >= 100,
+                            onActivate: _activateTaggerAbility,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _StatsBar(
+                              accent: _palette.accent,
+                              capturedCount: _capturedCount,
+                              remainingPlayers: remainingPlayers,
+                              items: const [],
+                              onItemTap: null,
+                              onItemEnabled: null,
+                            ),
+                          ),
+                        ],
+                      ),
                       const SizedBox(height: 12),
                       _CatchButton(
                         accent: _palette.accent,
@@ -482,12 +692,142 @@ class _RoomGamePageState extends State<RoomGamePage> {
                           );
                         },
                       ),
-                    ],
+                    ] else
+                      _StatsBar(
+                        accent: _palette.accent,
+                        capturedCount: _capturedCount,
+                        remainingPlayers: remainingPlayers,
+                        items: _playerItems,
+                        onItemTap: _handleItemChipTap,
+                        onItemEnabled: _isItemUsable,
+                      ),
                   ],
                 ),
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  void _maybeStartTaggerTracking(LatLng initial) {
+    if (_role != PartyMemberRole.tagger) return;
+    _lastGaugeLatLng ??= initial;
+    _taggerPositionSub ??= Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.best,
+        distanceFilter: 2,
+      ),
+    ).listen((position) {
+      final latLng = LatLng(position.latitude, position.longitude);
+      _handleTaggerMovement(latLng);
+    });
+  }
+
+  void _handleTaggerMovement(LatLng latLng) {
+    final prev = _lastGaugeLatLng;
+    _lastGaugeLatLng = latLng;
+    var gainedPercent = 0;
+    if (prev != null) {
+      final delta = Geolocator.distanceBetween(
+        prev.latitude,
+        prev.longitude,
+        latLng.latitude,
+        latLng.longitude,
+      );
+      _gaugeDistanceBuffer += delta;
+      while (_gaugeDistanceBuffer >= 5) {
+        _gaugeDistanceBuffer -= 5;
+        gainedPercent += 1;
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _currentLatLng = latLng;
+      _updatePlayerMarker(latLng);
+      if (gainedPercent > 0 && _gaugePercent < 100) {
+        _gaugePercent = (_gaugePercent + gainedPercent).clamp(0, 100);
+      }
+    });
+  }
+
+  void _activateTaggerAbility() {
+    if (_gaugePercent < 100) {
+      _showSnack('ゲージが満タンになるまで歩いてください');
+      return;
+    }
+    if (_isUsingTaggerAbility) return;
+    unawaited(_executeTaggerAbility());
+  }
+
+  Future<void> _executeTaggerAbility() async {
+    final gameId = widget.args.gameId;
+    if (gameId == null) {
+      _showSnack('ゲーム情報が見つかりません');
+      return;
+    }
+    setState(() {
+      _isUsingTaggerAbility = true;
+      _gaugePercent = 0;
+      _gaugeDistanceBuffer = 0;
+    });
+    try {
+      final locations = await _partyService.fetchRunnerLocationsForTagger(gameId);
+      if (!mounted) return;
+      final markers = <Marker>[];
+      for (final loc in locations) {
+        final pos = loc.latLng;
+        if (pos == null) continue;
+        markers.add(
+          Marker(
+            markerId: MarkerId('runner_${loc.playerId}_${loc.isDecoy ? 'decoy' : 'real'}'),
+            position: pos,
+            infoWindow: InfoWindow(title: loc.isDecoy ? '偽の位置' : '逃走者'),
+            icon: BitmapDescriptor.defaultMarkerWithHue(
+              loc.isDecoy ? BitmapDescriptor.hueOrange : BitmapDescriptor.hueGreen,
+            ),
+          ),
+        );
+      }
+      if (markers.isEmpty) {
+        _showSnack('逃走者の位置情報がありません');
+      } else {
+        setState(() {
+          _markers.removeWhere((m) => m.markerId.value.startsWith('runner_'));
+          _markers.addAll(markers);
+        });
+        _runnerMarkerTimer?.cancel();
+        _runnerMarkerTimer = Timer(const Duration(seconds: 5), () {
+          if (!mounted) return;
+          setState(() {
+            _markers.removeWhere((m) => m.markerId.value.startsWith('runner_'));
+          });
+        });
+        _showSnack('逃走者の位置を表示中');
+      }
+    } catch (e, s) {
+      debugPrint('Failed to activate tagger ability: $e\n$s');
+      if (mounted) {
+        _showSnack('逃走者の位置を取得できませんでした');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isUsingTaggerAbility = false);
+      } else {
+        _isUsingTaggerAbility = false;
+      }
+    }
+  }
+
+  void _updatePlayerMarker(LatLng latLng) {
+    _markers.removeWhere((m) => m.markerId.value == 'me');
+    _markers.add(
+      Marker(
+        markerId: const MarkerId('me'),
+        position: latLng,
+        icon: BitmapDescriptor.defaultMarkerWithHue(
+          BitmapDescriptor.hueAzure,
         ),
       ),
     );
@@ -645,18 +985,22 @@ class _StatsBar extends StatelessWidget {
   final Color accent;
   final int capturedCount;
   final int remainingPlayers;
-  final List<String> items;
+  final List<PlayerItem> items;
+  final ValueChanged<PlayerItem>? onItemTap;
+  final bool Function(PlayerItem item)? onItemEnabled;
 
   const _StatsBar({
     required this.accent,
     required this.capturedCount,
     required this.remainingPlayers,
     required this.items,
+    this.onItemTap,
+    this.onItemEnabled,
   });
 
   @override
   Widget build(BuildContext context) {
-    final visibleItems = items.take(2).toList();
+    final hasItems = items.isNotEmpty;
 
     return Container(
       padding: const EdgeInsets.all(12),
@@ -679,41 +1023,28 @@ class _StatsBar extends StatelessWidget {
               const Icon(Icons.backpack, size: 18),
               const SizedBox(width: 8),
               const Text(
-                '所持アイテム (最大2個)',
+                '所持アイテム',
                 style: TextStyle(
                   fontWeight: FontWeight.w600,
                   fontSize: 14,
                 ),
               ),
               const Spacer(),
-              Text(
-                '${visibleItems.length}/2',
-                style: const TextStyle(color: Colors.black54),
-              ),
+              Text('${items.length}個', style: const TextStyle(color: Colors.black54)),
             ],
           ),
           const SizedBox(height: 8),
-          if (visibleItems.isEmpty)
+          if (!hasItems)
             const Text(
               'まだアイテムはありません',
               style: TextStyle(color: Colors.black54),
             )
           else
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: visibleItems
-                  .map(
-                    (item) => Chip(
-                      label: Text(item),
-                      backgroundColor: accent.withOpacity(0.12),
-                      labelStyle: TextStyle(
-                        color: accent,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  )
-                  .toList(),
+            _ItemInventoryList(
+              accent: accent,
+              items: items,
+              onItemTap: onItemTap,
+              onItemEnabled: onItemEnabled,
             ),
           const Divider(height: 20),
           Row(
@@ -734,6 +1065,71 @@ class _StatsBar extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _ItemInventoryList extends StatelessWidget {
+  final Color accent;
+  final List<PlayerItem> items;
+  final ValueChanged<PlayerItem>? onItemTap;
+  final bool Function(PlayerItem item)? onItemEnabled;
+
+  const _ItemInventoryList({
+    required this.accent,
+    required this.items,
+    this.onItemTap,
+    this.onItemEnabled,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final double listHeight =
+        (items.length * 52.0).clamp(64.0, 200.0) as double;
+
+    return Container(
+      decoration: BoxDecoration(
+        border: Border.all(color: accent.withOpacity(0.2)),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Scrollbar(
+        thumbVisibility: items.length > 3,
+        child: SizedBox(
+          height: listHeight,
+          child: ListView.separated(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            shrinkWrap: true,
+            physics: items.length > 3
+                ? const ClampingScrollPhysics()
+                : const NeverScrollableScrollPhysics(),
+            itemCount: items.length,
+            itemBuilder: (context, index) {
+              final item = items[index];
+              final enabled = onItemEnabled?.call(item) ?? true;
+              final label = item.count > 1 ? '${item.type} x${item.count}' : item.type;
+              return ListTile(
+                dense: true,
+                enabled: enabled,
+                leading: Icon(Icons.inventory_2, color: accent),
+                title: Text(
+                  label,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                onTap: (onItemTap != null && enabled) ? () => onItemTap?.call(item) : null,
+                trailing: onItemTap != null
+                    ? Icon(
+                        Icons.play_circle,
+                        color: enabled ? accent : Colors.black26,
+                      )
+                    : null,
+              );
+            },
+            separatorBuilder: (_, __) => const Divider(height: 1),
+          ),
+        ),
       ),
     );
   }
@@ -783,6 +1179,89 @@ class _StatPill extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ],
+    );
+  }
+}
+
+class _AbilityGaugeButton extends StatelessWidget {
+  final double percent;
+  final bool isReady;
+  final Color accent;
+  final VoidCallback onActivate;
+
+  const _AbilityGaugeButton({
+    required this.percent,
+    required this.isReady,
+    required this.accent,
+    required this.onActivate,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final displayPercent = percent.clamp(0, 100).toInt();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        const Text(
+          'リッスンゲージ',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 4),
+        SizedBox(
+          width: 90,
+          height: 90,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              SizedBox(
+                width: 90,
+                height: 90,
+                child: CircularProgressIndicator(
+                  value: percent.clamp(0, 100) / 100,
+                  strokeWidth: 6,
+                  backgroundColor: Colors.grey.shade300,
+                  valueColor: AlwaysStoppedAnimation<Color>(accent),
+                ),
+              ),
+              SizedBox(
+                width: 70,
+                height: 70,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    shape: const CircleBorder(),
+                    backgroundColor: isReady ? accent : Colors.grey.shade500,
+                    padding: EdgeInsets.zero,
+                  ),
+                  onPressed: isReady ? onActivate : null,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.radar, color: Colors.white, size: 20),
+                      const SizedBox(height: 2),
+                      Text(
+                        '$displayPercent%',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          isReady ? '発動可能' : '5m移動で +1%',
+          style: TextStyle(
+            color: isReady ? accent : Colors.black54,
+            fontWeight: FontWeight.w600,
+          ),
         ),
       ],
     );

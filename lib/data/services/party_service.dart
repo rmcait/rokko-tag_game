@@ -133,6 +133,65 @@ class GameItem {
   }
 }
 
+class PlayerItem {
+  final String itemId;
+  final String type;
+  final int count;
+  final Timestamp? pickedAt;
+
+  const PlayerItem({
+    required this.itemId,
+    required this.type,
+    required this.count,
+    this.pickedAt,
+  });
+}
+
+class PlayerLocation {
+  final String playerId;
+  final String userId;
+  final PartyMemberRole role;
+  final LatLng? latLng;
+  final Timestamp? lastUpdateAt;
+  final bool isDecoy;
+
+  const PlayerLocation({
+    required this.playerId,
+    required this.userId,
+    required this.role,
+    required this.latLng,
+    required this.lastUpdateAt,
+    this.isDecoy = false,
+  });
+
+  factory PlayerLocation.fromDoc(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
+    final data = doc.data();
+    return PlayerLocation(
+      playerId: data['playerId'] as String? ?? doc.id,
+      userId: data['userId'] as String? ?? '',
+      role: partyMemberRoleFromCode(data['role'] as String?),
+      latLng: _parseLatLng(data['lastLocation']),
+      lastUpdateAt: data['lastUpdateAt'] as Timestamp?,
+      isDecoy: false,
+    );
+  }
+
+  PlayerLocation copyWith({
+    LatLng? latLng,
+    Timestamp? lastUpdateAt,
+    bool? isDecoy,
+  }) {
+    return PlayerLocation(
+      playerId: playerId,
+      userId: userId,
+      role: role,
+      latLng: latLng ?? this.latLng,
+      lastUpdateAt: lastUpdateAt ?? this.lastUpdateAt,
+      isDecoy: isDecoy ?? this.isDecoy,
+    );
+  }
+}
+
 class PartyLobbyData {
   final String partyId;
   final String inviteCode;
@@ -357,7 +416,6 @@ class PartyService {
         hasChanges = true;
       }
     }
-
     if (hasChanges) {
       await batch.commit();
     }
@@ -647,6 +705,149 @@ class PartyService {
         snap.docs.map((d) => GameItem.fromDoc(d)).toList(growable: false));
   }
 
+  Stream<List<PlayerItem>> watchPlayerItems(String gameId, String playerId) {
+    final playerRef = _firestore.collection('gameSessions').doc(gameId).collection('players').doc(playerId);
+    return playerRef.snapshots().map((snap) {
+      final data = snap.data();
+      if (data == null) return const <PlayerItem>[];
+      final rawItems = Map<String, dynamic>.from(data['items'] as Map<String, dynamic>? ?? {});
+      final result = <PlayerItem>[];
+      rawItems.forEach((itemId, entry) {
+        final map = entry is Map<String, dynamic> ? entry : null;
+        if (map == null) return;
+        final type = map['type'] as String?;
+        final count = (map['count'] as num?)?.toInt() ?? 0;
+        if (type == null || count <= 0) return;
+        result.add(
+          PlayerItem(
+            itemId: itemId,
+            type: type,
+            count: count,
+            pickedAt: map['pickedAt'] as Timestamp?,
+          ),
+        );
+      });
+      return result;
+    });
+  }
+
+  Future<List<PlayerLocation>> fetchTaggerLocations(String gameId) async {
+    final playersRef = _firestore.collection('gameSessions').doc(gameId).collection('players');
+    final snap = await playersRef.where('role', isEqualTo: PartyMemberRole.tagger.code).get();
+    return snap.docs.map(PlayerLocation.fromDoc).toList(growable: false);
+  }
+
+  Stream<List<PlayerLocation>> watchTaggerLocations(String gameId) {
+    final playersRef = _firestore.collection('gameSessions').doc(gameId).collection('players');
+    return playersRef.where('role', isEqualTo: PartyMemberRole.tagger.code).snapshots().map(
+          (snap) => snap.docs.map(PlayerLocation.fromDoc).toList(growable: false),
+        );
+  }
+
+  /// Automatically pick up the nearest item around the provided player location.
+  ///
+  /// Returns the picked [GameItem] if successful, otherwise `null`.
+  Future<GameItem?> pickupNearbyItem({
+    required String gameId,
+    required String playerId,
+    required LatLng playerLatLng,
+    double radiusMeters = 5,
+    Set<String>? allowedTypes,
+  }) async {
+    final itemsRef = _firestore.collection('gameSessions').doc(gameId).collection('items');
+    final snap = await itemsRef.where('state', isEqualTo: 'AVAILABLE').get();
+    GameItem? candidate;
+    var minDistance = radiusMeters;
+    for (final doc in snap.docs) {
+      final item = GameItem.fromDoc(doc);
+      if (allowedTypes != null && !allowedTypes.contains(item.type)) {
+        continue;
+      }
+      final distance = _distanceMeters(
+        playerLatLng.latitude,
+        playerLatLng.longitude,
+        item.lat,
+        item.lng,
+      );
+      if (distance <= minDistance) {
+        minDistance = distance;
+        candidate = item;
+      }
+    }
+
+    if (candidate == null) {
+      return null;
+    }
+
+    final picked = await pickupItem(
+      gameId: gameId,
+      itemId: candidate.itemId,
+      playerId: playerId,
+    );
+    return picked ? candidate : null;
+  }
+
+  /// Runner locations intended for tagger visibility tools.
+  ///
+  /// If a runner owns a `FAKE_LOCATION` item, the returned location will be
+  /// randomized and one stack of the item will be consumed automatically.
+  Future<List<PlayerLocation>> fetchRunnerLocationsForTagger(
+    String gameId, {
+    bool consumeFakeItems = true,
+  }) async {
+    final gameRef = _firestore.collection('gameSessions').doc(gameId);
+    final gameSnap = await gameRef.get();
+    final areaPolygon = _parsePolygonPoints(gameSnap.data()?['area']);
+
+    final playersRef = gameRef.collection('players');
+    final snap = await playersRef.where('role', isEqualTo: PartyMemberRole.runner.code).get();
+    if (snap.docs.isEmpty) return const [];
+
+    final rand = Random();
+    final List<_FakeConsumeRequest> consumeTargets = [];
+    final results = <PlayerLocation>[];
+
+    for (final doc in snap.docs) {
+      final data = doc.data();
+      final itemsMap = Map<String, dynamic>.from(data['items'] as Map<String, dynamic>? ?? {});
+      final fakeEntry = _extractFakeLocationEntry(itemsMap);
+      final baseLocation = PlayerLocation.fromDoc(doc);
+      if (fakeEntry != null && baseLocation.latLng != null) {
+        final fakeLatLng = _generateFakeLatLngWithinArea(
+          baseLocation.latLng!,
+          rand,
+          areaPolygon,
+        );
+        results.add(
+          baseLocation.copyWith(
+            latLng: fakeLatLng,
+            isDecoy: true,
+          ),
+        );
+        consumeTargets.add(
+          _FakeConsumeRequest(
+            playerId: baseLocation.playerId,
+            itemId: fakeEntry.itemId,
+          ),
+        );
+      } else {
+        results.add(baseLocation);
+      }
+    }
+
+    if (consumeFakeItems && consumeTargets.isNotEmpty) {
+      for (final target in consumeTargets) {
+        await consumePlayerItem(
+          gameId: gameId,
+          playerId: target.playerId,
+          itemId: target.itemId,
+        );
+      }
+    }
+
+    return results;
+  }
+
   Future<String?> findPlayerIdByUser(String gameId, String userId) async {
     final playersRef = _firestore.collection('gameSessions').doc(gameId).collection('players');
     final snap = await playersRef.where('userId', isEqualTo: userId).limit(1).get();
@@ -735,6 +936,117 @@ class PartyService {
     }
   }
 
+  Future<bool> consumePlayerItem({
+    required String gameId,
+    required String playerId,
+    required String itemId,
+  }) async {
+    final gameRef = _firestore.collection('gameSessions').doc(gameId);
+    final playerRef = gameRef.collection('players').doc(playerId);
+    final itemRef = gameRef.collection('items').doc(itemId);
+    try {
+      await _firestore.runTransaction((tx) async {
+        final playerSnap = await tx.get(playerRef);
+        if (!playerSnap.exists) {
+          throw Exception('player-not-found');
+        }
+        final playerData = playerSnap.data()!;
+        final itemsMap = Map<String, dynamic>.from(playerData['items'] as Map<String, dynamic>? ?? {});
+        final entry = itemsMap[itemId] is Map<String, dynamic>
+            ? Map<String, dynamic>.from(itemsMap[itemId] as Map<String, dynamic>)
+            : null;
+        if (entry == null) {
+          throw Exception('item-not-owned');
+        }
+        final currentCount = (entry['count'] as num?)?.toInt() ?? 0;
+        if (currentCount <= 1) {
+          itemsMap.remove(itemId);
+        } else {
+          entry['count'] = currentCount - 1;
+          itemsMap[itemId] = entry;
+        }
+
+        tx.update(playerRef, {
+          'items': itemsMap,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+
+        final itemSnap = await tx.get(itemRef);
+        if (!itemSnap.exists) {
+          throw Exception('item-doc-missing');
+        }
+
+        tx.update(itemRef, {
+          'state': 'USED',
+          'usedBy': playerId,
+          'usedAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+
+        final eventsRef = gameRef.collection('events').doc();
+        tx.set(eventsRef, {
+          'eventId': eventsRef.id,
+          'type': 'ITEM_USED',
+          'payload': {
+            'itemId': itemId,
+            'playerId': playerId,
+            'itemType': entry['type'] as String? ?? 'UNKNOWN',
+          },
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      });
+      return true;
+    } catch (e) {
+      print('consumePlayerItem failed: $e');
+      return false;
+    }
+  }
+
+  Future<bool> freezeTagger({
+    required String gameId,
+    required String targetPlayerId,
+    required String runnerPlayerId,
+    Duration duration = const Duration(seconds: 5),
+  }) async {
+    final gameRef = _firestore.collection('gameSessions').doc(gameId);
+    final targetRef = gameRef.collection('players').doc(targetPlayerId);
+    final freezeUntil = Timestamp.fromDate(DateTime.now().toUtc().add(duration));
+    try {
+      await _firestore.runTransaction((tx) async {
+        final targetSnap = await tx.get(targetRef);
+        if (!targetSnap.exists) {
+          throw Exception('target-not-found');
+        }
+        final targetData = targetSnap.data()!;
+        final cooldowns = Map<String, dynamic>.from(targetData['cooldowns'] as Map<String, dynamic>? ?? {});
+        cooldowns['freezeTaggerUntil'] = freezeUntil;
+
+        tx.update(targetRef, {
+          'cooldowns': cooldowns,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+
+        final eventsRef = gameRef.collection('events').doc();
+        tx.set(eventsRef, {
+          'eventId': eventsRef.id,
+          'type': 'FREEZE_TAGGER_TRIGGERED',
+          'payload': {
+            'targetPlayerId': targetPlayerId,
+            'targetUserId': targetData['userId'],
+            'runnerPlayerId': runnerPlayerId,
+            'durationSeconds': duration.inSeconds,
+            'freezeUntil': freezeUntil,
+          },
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      });
+      return true;
+    } catch (e) {
+      print('freezeTagger failed: $e');
+      return false;
+    }
+  }
+
   int _stableHash(String s) {
     // FNV-1a 32-bit
     var hash = 0x811c9dc5;
@@ -783,4 +1095,173 @@ class PartyService {
     }
     return inside;
   }
+
+  double _distanceMeters(
+    double startLat,
+    double startLng,
+    double endLat,
+    double endLng,
+  ) {
+    const earthRadius = 6378137.0;
+    final dLat = _degToRad(endLat - startLat);
+    final dLng = _degToRad(endLng - startLng);
+    final a = sin(dLat / 2) * sin(dLat / 2) +
+        cos(_degToRad(startLat)) * cos(_degToRad(endLat)) * sin(dLng / 2) * sin(dLng / 2);
+    final c = 2 * atan2(sqrt(a), sqrt(1 - a));
+    return earthRadius * c;
+  }
+
+  double _degToRad(double deg) => deg * (pi / 180);
+}
+
+class _FakeConsumeRequest {
+  final String playerId;
+  final String itemId;
+
+  _FakeConsumeRequest({
+    required this.playerId,
+    required this.itemId,
+  });
+}
+
+_FakeLocationEntry? _extractFakeLocationEntry(Map<String, dynamic> rawItems) {
+  for (final entry in rawItems.entries) {
+    final value = entry.value;
+    if (value is! Map<String, dynamic>) continue;
+    final map = Map<String, dynamic>.from(value);
+    final type = map['type'] as String?;
+    if (type != 'FAKE_LOCATION') continue;
+    final count = (map['count'] as num?)?.toInt() ?? 0;
+    if (count <= 0) continue;
+    return _FakeLocationEntry(
+      itemId: entry.key,
+      count: count,
+    );
+  }
+  return null;
+}
+
+class _FakeLocationEntry {
+  final String itemId;
+  final int count;
+
+  _FakeLocationEntry({
+    required this.itemId,
+    required this.count,
+  });
+}
+
+LatLng _generateFakeLatLng(LatLng origin, Random rand) {
+  // Offset the position by 20-60 meters in a random direction.
+  final distanceMeters = 20 + rand.nextDouble() * 40;
+  final bearing = rand.nextDouble() * 2 * pi;
+  const earthRadius = 6378137.0;
+
+  final latRad = origin.latitude * pi / 180;
+  final lngRad = origin.longitude * pi / 180;
+  final angularDistance = distanceMeters / earthRadius;
+
+  final newLat = asin(sin(latRad) * cos(angularDistance) +
+      cos(latRad) * sin(angularDistance) * cos(bearing));
+  final newLng = lngRad +
+      atan2(
+        sin(bearing) * sin(angularDistance) * cos(latRad),
+        cos(angularDistance) - sin(latRad) * sin(newLat),
+      );
+
+  return LatLng(
+    newLat * 180 / pi,
+    newLng * 180 / pi,
+  );
+}
+
+LatLng _generateFakeLatLngWithinArea(
+  LatLng origin,
+  Random rand,
+  List<LatLng> polygon,
+) {
+  if (polygon.isNotEmpty) {
+    return _samplePointInPolygon(polygon, rand);
+  }
+  return _generateFakeLatLng(origin, rand);
+}
+
+LatLng? _parseLatLng(dynamic raw) {
+  if (raw == null) return null;
+  if (raw is LatLng) return raw;
+  if (raw is GeoPoint) {
+    return LatLng(raw.latitude, raw.longitude);
+  }
+  if (raw is Map<String, dynamic>) {
+    final lat = _toDouble(raw['lat'] ?? raw['latitude'] ?? raw['x']);
+    final lng = _toDouble(raw['lng'] ?? raw['lon'] ?? raw['longitude'] ?? raw['y']);
+    if (lat != null && lng != null) {
+      return LatLng(lat, lng);
+    }
+  }
+  if (raw is List && raw.length >= 2) {
+    final lat = _toDouble(raw[0]);
+    final lng = _toDouble(raw[1]);
+    if (lat != null && lng != null) {
+      return LatLng(lat, lng);
+    }
+  }
+  if (raw is String) {
+    final coords = _parseLatLngString(raw);
+    if (coords != null) {
+      return LatLng(coords[0], coords[1]);
+    }
+  }
+  return null;
+}
+
+double? _toDouble(dynamic value) {
+  if (value is double) return value;
+  if (value is int) return value.toDouble();
+  if (value is num) return value.toDouble();
+  if (value is String) return double.tryParse(value.trim());
+  return null;
+}
+
+List<double>? _parseLatLngString(String input) {
+  final stripped = input.replaceAll(RegExp(r'[\[\]]'), '');
+  final parts = stripped.split(RegExp(r',\s*'));
+  if (parts.length < 2) return null;
+  final lat = _parseCoordinateValue(parts[0]);
+  final lng = _parseCoordinateValue(parts[1]);
+  if (lat == null || lng == null) return null;
+  return [lat, lng];
+}
+
+double? _parseCoordinateValue(String part) {
+  final match = RegExp(r'-?\d+(?:\.\d+)?').firstMatch(part);
+  if (match == null) return null;
+  final base = double.tryParse(match.group(0)!);
+  if (base == null) return null;
+  final upper = part.toUpperCase();
+  final isNegative = upper.contains('S') || upper.contains('W');
+  if (isNegative) {
+    return -base.abs();
+  }
+  return base;
+}
+
+List<LatLng> _parsePolygonPoints(dynamic rawArea) {
+  if (rawArea is Map<String, dynamic>) {
+    final poly = rawArea['polygon'];
+    if (poly is List) {
+      final result = <LatLng>[];
+      for (final entry in poly) {
+        if (entry is Map<String, dynamic>) {
+          final lat = (entry['lat'] as num?)?.toDouble();
+          final lng = (entry['lng'] as num?)?.toDouble();
+          if (lat != null && lng != null) {
+            result.add(LatLng(lat, lng));
+          }
+        }
+      }
+      return result;
+    }
+  }
+  return const [];
 }
