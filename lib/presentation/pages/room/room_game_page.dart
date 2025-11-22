@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:vibration/vibration.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -108,6 +109,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
   bool _isPickingItem = false;
   bool _isUsingItem = false;
   bool _freezeReady = false;
+  final Random _random = Random();
   double _taggerGauge = 0;
   LatLng? _lastGaugePoint;
   bool _isListeningAbilityActive = false;
@@ -609,6 +611,9 @@ class _RoomGamePageState extends State<RoomGamePage> {
     if (type == 'FREEZE_TAGGER') {
       return _freezeReady;
     }
+    if (type == 'FAKE_LOCATION') {
+      return false;
+    }
     return true;
   }
 
@@ -768,21 +773,35 @@ class _RoomGamePageState extends State<RoomGamePage> {
     });
 
     try {
-      final snapshot = await FirebaseFirestore.instance
+      final firestore = FirebaseFirestore.instance;
+      final snapshot = await firestore
           .collection('gameSessions')
           .doc(gameId)
           .collection('players')
           .where('role', isEqualTo: 'RUNNER')
           .get();
       final markers = <Marker>{};
+      final consumeFutures = <Future<void>>[];
       for (final doc in snapshot.docs) {
         final data = doc.data();
         final geo = data['lastLocation'] as GeoPoint?;
         if (geo == null) continue;
+        var markerLatLng = LatLng(geo.latitude, geo.longitude);
+        final runnerItems =
+            List<String>.from((data['items'] as List<dynamic>?) ?? const []);
+        final hasFakeLocation = runnerItems.contains('FAKE_LOCATION');
+        if (hasFakeLocation) {
+          markerLatLng = _generateFakeLocation(markerLatLng);
+          consumeFutures.add(_consumeItemForRunner(
+            gameId: gameId,
+            playerId: doc.id,
+            itemType: 'FAKE_LOCATION',
+          ));
+        }
         markers.add(
           Marker(
             markerId: MarkerId('listen_${doc.id}'),
-            position: LatLng(geo.latitude, geo.longitude),
+            position: markerLatLng,
             icon: BitmapDescriptor.defaultMarkerWithHue(
               BitmapDescriptor.hueOrange,
             ),
@@ -791,6 +810,9 @@ class _RoomGamePageState extends State<RoomGamePage> {
             ),
           ),
         );
+      }
+      if (consumeFutures.isNotEmpty) {
+        await Future.wait(consumeFutures);
       }
       if (markers.isEmpty) {
         if (mounted) {
@@ -842,24 +864,14 @@ class _RoomGamePageState extends State<RoomGamePage> {
     final gameId = lobby.gameId;
     if (gameId == null || gameId.isEmpty) return;
     final playerId = widget.args.currentUserId;
-    final firestore = FirebaseFirestore.instance;
-    final playerRef = firestore
-        .collection('gameSessions')
-        .doc(gameId)
-        .collection('players')
-        .doc(playerId);
-
-    await firestore.runTransaction((tx) async {
-      final snap = await tx.get(playerRef);
-      final items =
-          List<String>.from((snap.data()?['items'] as List<dynamic>?) ?? const []);
-      final removed = items.remove(itemType);
-      if (!removed) {
-        throw Exception('アイテムが見つかりません');
-      }
-      tx.update(playerRef, {'items': items});
-    });
-
+    final removed = await _removeItemFromPlayerDoc(
+      gameId: gameId,
+      playerId: playerId,
+      itemType: itemType,
+    );
+    if (!removed) {
+      throw Exception('アイテムが見つかりません');
+    }
     await _markUsedItemDoc(gameId, playerId, itemType);
 
     if (mounted) {
@@ -962,6 +974,66 @@ class _RoomGamePageState extends State<RoomGamePage> {
       'state': 'USED',
       'updatedAt': FieldValue.serverTimestamp(),
     });
+  }
+
+  Future<bool> _removeItemFromPlayerDoc({
+    required String gameId,
+    required String playerId,
+    required String itemType,
+  }) async {
+    final firestore = FirebaseFirestore.instance;
+    final playerRef = firestore
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('players')
+        .doc(playerId);
+
+    return firestore.runTransaction((tx) async {
+      final snap = await tx.get(playerRef);
+      if (!snap.exists) return false;
+      final items =
+          List<String>.from((snap.data()?['items'] as List<dynamic>?) ?? const []);
+      final removed = items.remove(itemType);
+      if (removed) {
+        tx.update(playerRef, {
+          'items': items,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+      return removed;
+    });
+  }
+
+  Future<void> _consumeItemForRunner({
+    required String gameId,
+    required String playerId,
+    required String itemType,
+  }) async {
+    final removed = await _removeItemFromPlayerDoc(
+      gameId: gameId,
+      playerId: playerId,
+      itemType: itemType,
+    );
+    if (removed) {
+      await _markUsedItemDoc(gameId, playerId, itemType);
+    }
+  }
+
+  LatLng _generateFakeLocation(LatLng base) {
+    const minMeters = 30.0;
+    const maxMeters = 80.0;
+    final distance = minMeters + _random.nextDouble() * (maxMeters - minMeters);
+    final bearing = _random.nextDouble() * 2 * pi;
+    final deltaLatMeters = distance * cos(bearing);
+    final deltaLngMeters = distance * sin(bearing);
+    const metersPerDegree = 111320.0;
+    final deltaLat = deltaLatMeters / metersPerDegree;
+    final cosLat = cos(base.latitude * pi / 180).abs();
+    final lngScale = cosLat < 0.0001 ? 0.0001 : cosLat;
+    final deltaLng = deltaLngMeters / (metersPerDegree * lngScale);
+    final fakeLat = base.latitude + deltaLat;
+    final fakeLng = base.longitude + deltaLng;
+    return LatLng(fakeLat, fakeLng);
   }
 
   Future<void> _pickupItem(_GameItem item) async {
