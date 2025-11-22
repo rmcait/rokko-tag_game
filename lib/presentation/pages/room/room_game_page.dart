@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:vibration/vibration.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -7,9 +8,10 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../../data/services/party_service.dart';
 import '../../routes.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:cloud_functions/cloud_functions.dart';
+import 'package:cloud_functions/cloud_functions.dart';import 'game_over_page.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:ntp/ntp.dart'; // ★追加
+import 'package:ntp/ntp.dart'; 
+import 'package:flutter/foundation.dart'; // ★追加：kDebugMode でデバッグ時だけボタンを出す
 import 'package:turf/turf.dart' as turf;
 class RoomGamePageArgs {
   final PartyLobbyData lobby;
@@ -50,11 +52,72 @@ class _PlayerInfo {
     required this.caught,
   });
 }
+
+class _GameItem {
+  final String itemId;
+  final String type;
+  final String visibility;
+  final String state;
+  final double lat;
+  final double lng;
+
+  const _GameItem({
+    required this.itemId,
+    required this.type,
+    required this.visibility,
+    required this.state,
+    required this.lat,
+    required this.lng,
+  });
+
+  factory _GameItem.fromDoc(
+    QueryDocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final data = doc.data();
+    return _GameItem(
+      itemId: data['itemId'] as String? ?? doc.id,
+      type: data['type'] as String? ?? 'UNKNOWN',
+      visibility: data['visibility'] as String? ?? 'RUNNER',
+      state: data['state'] as String? ?? 'AVAILABLE',
+      lat: (data['lat'] as num?)?.toDouble() ?? 0,
+      lng: (data['lng'] as num?)?.toDouble() ?? 0,
+    );
+  }
+}
+
+const Set<String> _runnerVisibleItemTypes = {
+  'FREEZE_TAGGER',
+  'SEE_TAGGER',
+  'FAKE_LOCATION',
+};
+
+const Set<String> _taggerVisibleItemTypes = {
+  'TRAP',
+  'FAKE_LOCATION_TAGGER',
+};
+
+class _ItemStates {
+  static const available = 'AVAILABLE';
+  static const picked = 'PICKED';
+  static const armed = 'ARMED';
+  static const used = 'USED';
+}
+
+Set<String> _visibleItemTypesForRole(PartyMemberRole role) {
+  switch (role) {
+    case PartyMemberRole.tagger:
+      return _taggerVisibleItemTypes;
+    case PartyMemberRole.runner:
+    case PartyMemberRole.pending:
+      return _runnerVisibleItemTypes;
+  }
+}
 class _RoomGamePageState extends State<RoomGamePage> {
   final PartyService _partyService = PartyService();
 
   StreamSubscription<Position>? _posSub;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _playersSub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _itemsSub;
 
   String? _myRoleCode;          // 'TAGGER' / 'RUNNER' / 'PENDING'
   GeoPoint? _myLastGeo;
@@ -64,7 +127,15 @@ class _RoomGamePageState extends State<RoomGamePage> {
   final List<DocumentReference<Map<String, dynamic>>> _nearRunnerRefs = [];
 
   final List<_PlayerInfo> _players = [];
-  
+  final List<_GameItem> _gameItems = [];
+  final List<_GameItem> _armedTraps = [];
+  bool _isPickingItem = false;
+  bool _isUsingItem = false;
+  bool _freezeReady = false;
+  final Random _random = Random();
+  double _taggerGauge = 0;
+  LatLng? _lastGaugePoint;
+  bool _isListeningAbilityActive = false;
 
   late PartyMemberRole _role;
   late _RolePalette _palette;
@@ -77,6 +148,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
   bool _showGo = false;
 
   int _capturedCount = 0;
+  int _totalRunners = 0; 
   final List<String> _items = [];
   late int _remainingSeconds;
   String? _initErrorMessage;
@@ -86,12 +158,87 @@ class _RoomGamePageState extends State<RoomGamePage> {
   bool _isLocating = true;
   String? _locationError;
   final Set<Marker> _markers = {};
+  final Set<Marker> _playerMarkers = {};
+  final Set<Marker> _itemMarkers = {};
+  final Set<Marker> _effectMarkers = {};
+  Timer? _revealTimer;
+  GeoPoint? _lastTaggerGeo;
+  String? _currentTaggerId;
+  GeoPoint? _freezeOrigin;
+  DateTime? _freezeUntil;
+  bool _freezePopupShown = false;
   Set<Polygon> _fieldPolygons = {};
   List<_PlayerInfo> get _otherPlayers =>
-        _players.where((p) => !p.isMe).toList();
+      _players.where((p) => !p.isMe && !p.caught).toList();
   List<LatLng> _fieldPoints = [];
   bool _outsideNotified = false;
+  bool _navigatedByGameEnd = false;
+  bool _iAmCaught = false;
+  bool _showCaughtOverlay = false;
   int _ntpOffset = 0;
+
+  bool get _isCurrentlyFrozen {
+    final until = _freezeUntil;
+    if (until == null) return false;
+    return _now.isBefore(until);
+  }
+
+  bool get _isHost {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    return lobby.owner.userId == widget.args.currentUserId;
+  }
+
+  bool get _allRunnersCaught {
+    // プレイヤーからRUNNERだけを取り出す
+    final runners = _players.where((p) => p.role == 'RUNNER').toList();
+    if (runners.isEmpty) return false;
+    // 全員 caught == true なら true
+    return runners.every((p) => p.caught);
+  }
+
+  bool get _canHostEndGame {
+    // タイムアップ or 全RUNNER確保
+    return _remainingSeconds <= 0 || _allRunnersCaught;
+  }
+  Future<void> _endGameForAll() async {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+
+    if (gameId == null || gameId.isEmpty) return;
+
+    // 念のためホスト以外は弾く
+    if (!_isHost) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('ホストだけがゲーム終了できます')),
+        );
+      }
+      return;
+    }
+
+    try {
+      await _partyService.updateGameStatus(
+        gameId: gameId,
+        status: 'FINISHED',
+        partyId: lobby.partyId,
+      );
+      // 自分も即ホームに戻る（他の人は watch で自動遷移）
+      if (mounted && !_navigatedByGameEnd) {
+        _navigatedByGameEnd = true;
+        Navigator.of(context).pushNamedAndRemoveUntil(
+          AppRoutes.home,
+          (route) => false,
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('ゲーム終了に失敗しました: $e')),
+      );
+    }
+  }
+
+
   @override
   void initState() {
     super.initState();
@@ -123,6 +270,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
     _loadFieldPolygon();
     _startLocationWatch(); // ★ 追加：継続的な位置送信
     _startPlayersWatch();
+    _startItemsWatch();
     _refreshLobbyRole();
   }
   // ★追加: 通知セットアップメソッド
@@ -193,9 +341,32 @@ class _RoomGamePageState extends State<RoomGamePage> {
   ).listen((pos) async {
     final current = LatLng(pos.latitude, pos.longitude);
 
+    final effectiveRole = _effectiveRole(_myRoleCode);
+    if (_isCurrentlyFrozen && _freezeOrigin != null) {
+      final freezeDistance = Geolocator.distanceBetween(
+        _freezeOrigin!.latitude,
+        _freezeOrigin!.longitude,
+        current.latitude,
+        current.longitude,
+      );
+      if (freezeDistance > 5) {
+        if (!_freezePopupShown && mounted) {
+          _freezePopupShown = true;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('現在フリーズ中のため動けません')),
+          );
+        }
+        return;
+      }
+    } else if (_freezePopupShown) {
+      _freezePopupShown = false;
+    }
+
       setState(() {
         _currentLatLng = current;
       });
+      _updateTaggerGauge(current);
+      _checkTrapCollision(current, effectiveRole);
 
     // Firestore に自分の位置を書き込む
     final gameId = widget.args.lobby.gameId;
@@ -219,6 +390,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
     );
 
       _checkFieldBoundary(current);
+      _tryPickupNearbyItems(current);
     });
   }
     void _startPlayersWatch() {
@@ -237,6 +409,8 @@ class _RoomGamePageState extends State<RoomGamePage> {
       GeoPoint? myGeo;
       String? myRole;
       bool myCaught = false;
+      List<String>? myItemsList;
+      GeoPoint? taggerGeo;
 
       for (final doc in snapshot.docs) {
         final data = doc.data();
@@ -250,10 +424,24 @@ class _RoomGamePageState extends State<RoomGamePage> {
         final name =
             data['displayName'] as String? ?? 'Player ${doc.id.substring(0, 4)}';
 
+        if (role == 'TAGGER') {
+          taggerGeo = geo;
+          _currentTaggerId = doc.id;
+        }
+
         if (isMe) {
           myGeo = geo;
           myRole = role;
           myCaught = caught;
+          final rawItems = (data['items'] as List<dynamic>?) ?? const [];
+          myItemsList = rawItems.cast<String>();
+          final freezeUntil = (data['freezeUntil'] as Timestamp?)?.toDate();
+          final freezeOrigin = data['freezeOrigin'] as GeoPoint?;
+          _freezeUntil = freezeUntil;
+          _freezeOrigin = freezeOrigin;
+          if (!_isCurrentlyFrozen) {
+            _freezePopupShown = false;
+          }
         }
 
         players.add(
@@ -269,28 +457,76 @@ class _RoomGamePageState extends State<RoomGamePage> {
         );
       }
 
-      final captured = players.where((p) => p.caught).length;
+    final totalRunners =
+          players.where((p) => p.role == 'RUNNER').length;
+    final captured =
+          players.where((p) => p.role == 'RUNNER' && p.caught).length;
 
     // ★ 逃走側が捕まったときの通知（1回だけ）
     if (myRole == 'RUNNER' && myCaught && !_alreadyNotifiedCaught) {
       _alreadyNotifiedCaught = true;
-      if (mounted) {
+      if (!mounted) return;
+
+        setState(() {
+          _iAmCaught = true;        // ← 観戦モードに入ったことを覚えておく
+          _showCaughtOverlay = true;  // ← オーバーレイ表示フラグを立てる
+        });
+
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('捕まってしまいました…！')),
         );
       }
-    }
+      // if (mounted) {
+      //   ScaffoldMessenger.of(context).showSnackBar(
+      //     const SnackBar(content: Text('捕まってしまいました…！')),
+      //   );
+      //   //Game Over時の画面遷移
+      //   Future.microtask(() {
+      //     if (!mounted) return;
+      //     Navigator.of(context).pushReplacementNamed(
+      //       AppRoutes.gameOver, // ←あなたのルート名に合わせて変更
+      //       arguments: GameOverPageArgs(
+      //         lobby: _latestLobby ?? widget.args.lobby,
+      //         gameId: widget.args.gameId,
+      //         currentUserId: widget.args.currentUserId,
+      //       ),
+      //     );
+      //   });
+      //}
 
     if (!mounted) return;
 
     // 状態更新
+    final hasFreezeItem =
+        (myItemsList ?? const <String>[]).contains('FREEZE_TAGGER');
+    final freezeReady = hasFreezeItem &&
+        myGeo != null &&
+        taggerGeo != null &&
+        Geolocator.distanceBetween(
+              myGeo.latitude,
+              myGeo.longitude,
+              taggerGeo.latitude,
+              taggerGeo.longitude,
+            ) <=
+            5;
+
     setState(() {
       _players
         ..clear()
         ..addAll(players);
       _myLastGeo = myGeo;
       _myRoleCode = myRole;
-      _capturedCount = captured;
+      _totalRunners = totalRunners;   // ★追加
+      _capturedCount = captured;  
+      _items
+        ..clear()
+        ..addAll(myItemsList ?? const []);
+      _freezeReady = freezeReady;
+      _lastTaggerGeo = taggerGeo;
+      if (_effectiveRole(myRole) != 'TAGGER') {
+        _taggerGauge = 0;
+        _lastGaugePoint = null;
+      }
     });
 
     // マーカー描画を更新
@@ -304,6 +540,775 @@ class _RoomGamePageState extends State<RoomGamePage> {
     );
     });
   }
+
+  void _startItemsWatch() {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) return;
+
+    _itemsSub = FirebaseFirestore.instance
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('items')
+        .snapshots()
+        .listen(
+      (snapshot) {
+        final allowedTypes = _visibleItemTypesForRole(_role);
+        final allItems = snapshot.docs.map(_GameItem.fromDoc).toList();
+        final items =
+            allItems.where((item) => allowedTypes.contains(item.type)).toList();
+        if (!mounted) return;
+        final markers = _buildItemMarkers(items);
+        setState(() {
+          _gameItems
+            ..clear()
+            ..addAll(allItems);
+          _itemMarkers
+            ..clear()
+            ..addAll(markers);
+          _armedTraps
+            ..clear()
+            ..addAll(
+              allItems.where(
+                (item) =>
+                    item.type == 'TRAP' && item.state == _ItemStates.armed,
+              ),
+            );
+          _refreshCombinedMarkers();
+        });
+      },
+      onError: (error, stack) {
+        debugPrint('Failed to watch items: $error\n$stack');
+      },
+    );
+  }
+
+  Set<Marker> _buildItemMarkers(List<_GameItem> items) {
+    final markers = <Marker>{};
+    for (final item in items) {
+      final shouldShow = item.state == _ItemStates.available ||
+          (item.type == 'TRAP' && item.state == _ItemStates.armed);
+      if (!shouldShow) continue;
+      final hue = _itemHueByType(item.type);
+      markers.add(
+        Marker(
+          markerId: MarkerId('item_${item.itemId}'),
+          position: LatLng(item.lat, item.lng),
+          icon: BitmapDescriptor.defaultMarkerWithHue(hue),
+          infoWindow: InfoWindow(
+            title: _itemLabelByType(item.type),
+            snippet: 'アイテムを拾えます',
+          ),
+        ),
+      );
+    }
+    return markers;
+  }
+
+  double _itemHueByType(String type) {
+    switch (type) {
+      case 'FREEZE_TAGGER':
+        return BitmapDescriptor.hueAzure;
+      case 'SEE_TAGGER':
+        return BitmapDescriptor.hueGreen;
+      case 'FAKE_LOCATION':
+        return BitmapDescriptor.hueCyan;
+      case 'TRAP':
+        return BitmapDescriptor.hueRed;
+      case 'FAKE_LOCATION_TAGGER':
+        return BitmapDescriptor.hueMagenta;
+      default:
+        return BitmapDescriptor.hueRose;
+    }
+  }
+
+  String _itemLabelByType(String type) {
+    switch (type) {
+      case 'FREEZE_TAGGER':
+        return 'フリーズ鬼';
+      case 'SEE_TAGGER':
+        return '鬼を探知';
+      case 'FAKE_LOCATION':
+        return 'フェイク位置';
+      case 'TRAP':
+        return 'トラップ';
+      case 'FAKE_LOCATION_TAGGER':
+        return 'フェイク位置(鬼)';
+      default:
+        return type;
+    }
+  }
+  
+  bool _isItemEnabled(String type) {
+    if (_iAmCaught) {
+      return false;
+    }
+    if (_role == PartyMemberRole.runner) {
+      if (type == 'FREEZE_TAGGER') {
+        return _freezeReady;
+      }
+      if (type == 'FAKE_LOCATION') {
+        return false;
+      }
+      return type != 'TRAP';
+    } else if (_role == PartyMemberRole.tagger) {
+      if (type == 'TRAP') {
+        return true;
+      }
+      if (type == 'FAKE_LOCATION_TAGGER') {
+        return false;
+      }
+      return type != 'FAKE_LOCATION';
+    }
+    return false;
+  }
+
+  Future<void> _tryPickupNearbyItems(LatLng current) async {
+    if (_isPickingItem) return;
+    final role = _effectiveRole(_myRoleCode);
+    if (_items.length >= 2) return;
+    if (role == 'PENDING') return;
+
+    final allowedTypes = role == 'TAGGER'
+        ? _taggerVisibleItemTypes
+        : _runnerVisibleItemTypes;
+
+    final nearby = _gameItems.where(
+      (item) =>
+          item.state == 'AVAILABLE' &&
+          allowedTypes.contains(item.type) &&
+          _itemVisibleToRole(item, role),
+    );
+    for (final item in nearby) {
+      final distance = Geolocator.distanceBetween(
+        current.latitude,
+        current.longitude,
+        item.lat,
+        item.lng,
+      );
+      if (distance <= 5) {
+        _isPickingItem = true;
+        try {
+          await _pickupItem(item);
+        } finally {
+          _isPickingItem = false;
+        }
+        break;
+      }
+    }
+  }
+
+  void _handleItemPressed(String itemType) {
+    if (!_items.contains(itemType)) {
+      return;
+    }
+    if (!_isItemEnabled(itemType)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('条件を満たしていません')),
+      );
+      return;
+    }
+    if (_isUsingItem) {
+      return;
+    }
+    _useItem(itemType);
+  }
+
+  Future<void> _useItem(String itemType) async {
+    _isUsingItem = true;
+    try {
+      switch (itemType) {
+        case 'SEE_TAGGER':
+          await _revealTaggerLocation();
+          break;
+        case 'FREEZE_TAGGER':
+          await _applyFreezeToTagger();
+          break;
+        case 'TRAP':
+          await _deployTrap();
+          break;
+        default:
+          if (!mounted) break;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('$itemType はまだ実装されていません')),
+          );
+          break;
+      }
+      await _consumeItem(itemType);
+    } catch (e, s) {
+      debugPrint('Failed to use item: $e\n$s');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('アイテムの使用に失敗しました: $e')),
+        );
+      }
+    } finally {
+      _isUsingItem = false;
+    }
+  }
+
+  Future<void> _revealTaggerLocation() async {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) return;
+
+    final query = await FirebaseFirestore.instance
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('players')
+        .where('role', isEqualTo: 'TAGGER')
+        .get();
+
+    final markers = <Marker>{};
+    for (final doc in query.docs) {
+      final data = doc.data();
+      final geo = data['lastLocation'] as GeoPoint?;
+      if (geo == null) continue;
+      var position = LatLng(geo.latitude, geo.longitude);
+      final taggerItems =
+          List<String>.from((data['items'] as List<dynamic>?) ?? const []);
+      if (taggerItems.contains('FAKE_LOCATION_TAGGER')) {
+        position = await _maybeApplyTaggerFakeLocation(
+          realPosition: position,
+          taggerId: doc.id,
+        );
+      }
+      markers.add(
+        Marker(
+          markerId: MarkerId('reveal_${doc.id}'),
+          position: position,
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+          infoWindow: const InfoWindow(title: '鬼の位置'),
+        ),
+      );
+    }
+
+    if (markers.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('鬼の位置を取得できませんでした')),
+        );
+      }
+      return;
+    }
+
+    setState(() {
+      _effectMarkers
+        ..clear()
+        ..addAll(markers);
+      _refreshCombinedMarkers();
+    });
+
+    _revealTimer?.cancel();
+    _revealTimer = Timer(const Duration(seconds: 5), () {
+      if (!mounted) return;
+      setState(() {
+        _effectMarkers.clear();
+        _refreshCombinedMarkers();
+      });
+    });
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('鬼の位置を5秒間表示します')),
+      );
+    }
+  }
+  Future<void> _triggerListenAbility() async {
+    if (_taggerGauge < 1 || _isListeningAbilityActive) {
+      return;
+    }
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) return;
+
+    setState(() {
+      _isListeningAbilityActive = true;
+      _taggerGauge = 0;
+      _lastGaugePoint = _currentLatLng;
+    });
+
+    try {
+      final firestore = FirebaseFirestore.instance;
+      final snapshot = await firestore
+          .collection('gameSessions')
+          .doc(gameId)
+          .collection('players')
+          .where('role', isEqualTo: 'RUNNER')
+          .get();
+      final markers = <Marker>{};
+      final consumeFutures = <Future<void>>[];
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final geo = data['lastLocation'] as GeoPoint?;
+        if (geo == null) continue;
+        var markerLatLng = LatLng(geo.latitude, geo.longitude);
+        final runnerItems =
+            List<String>.from((data['items'] as List<dynamic>?) ?? const []);
+        final hasFakeLocation = runnerItems.contains('FAKE_LOCATION');
+        if (hasFakeLocation) {
+          markerLatLng = _generateFakeLocation(markerLatLng);
+          consumeFutures.add(_consumeItemForRunner(
+            gameId: gameId,
+            playerId: doc.id,
+            itemType: 'FAKE_LOCATION',
+          ));
+        }
+        markers.add(
+          Marker(
+            markerId: MarkerId('listen_${doc.id}'),
+            position: markerLatLng,
+            icon: BitmapDescriptor.defaultMarkerWithHue(
+              BitmapDescriptor.hueOrange,
+            ),
+            infoWindow: InfoWindow(
+              title: data['displayName'] as String? ?? 'Runner',
+            ),
+          ),
+        );
+      }
+      if (consumeFutures.isNotEmpty) {
+        await Future.wait(consumeFutures);
+      }
+      if (markers.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('逃走者の位置を取得できませんでした')),
+          );
+        }
+      } else {
+        setState(() {
+          _effectMarkers
+            ..clear()
+            ..addAll(markers);
+          _refreshCombinedMarkers();
+        });
+        _revealTimer?.cancel();
+        _revealTimer = Timer(const Duration(seconds: 5), () {
+          if (!mounted) return;
+          setState(() {
+            _effectMarkers.clear();
+            _refreshCombinedMarkers();
+          });
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('逃走者の位置を5秒間表示します')),
+          );
+        }
+      }
+    } catch (e, s) {
+      debugPrint('Failed to trigger listen ability: $e\n$s');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('リッスン発動に失敗しました: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isListeningAbilityActive = false;
+        });
+      } else {
+        _isListeningAbilityActive = false;
+      }
+    }
+  }
+
+  Future<void> _consumeItem(String itemType) async {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) return;
+    final playerId = widget.args.currentUserId;
+    final removed = await _removeItemFromPlayerDoc(
+      gameId: gameId,
+      playerId: playerId,
+      itemType: itemType,
+    );
+    if (!removed) {
+      throw Exception('アイテムが見つかりません');
+    }
+    await _markUsedItemDoc(gameId, playerId, itemType);
+
+    if (mounted) {
+      setState(() {
+        _items.remove(itemType);
+        if (itemType == 'FREEZE_TAGGER') {
+          _freezeReady = false;
+        }
+      });
+    }
+  }
+
+  void _updateTaggerGauge(LatLng current) {
+    final role = _effectiveRole(_myRoleCode);
+    if (role != 'TAGGER' || _iAmCaught) {
+      _lastGaugePoint = null;
+      return;
+    }
+    if (_isListeningAbilityActive) {
+      return;
+    }
+    final prev = _lastGaugePoint;
+    _lastGaugePoint = current;
+    if (prev == null) {
+      return;
+    }
+    final distance = Geolocator.distanceBetween(
+      prev.latitude,
+      prev.longitude,
+      current.latitude,
+      current.longitude,
+    );
+    if (distance <= 0) return;
+    final increment = distance / 500.0; // 5m で 1%
+    setState(() {
+      _taggerGauge = (_taggerGauge + increment).clamp(0.0, 1.0);
+    });
+  }
+
+  Future<void> _applyFreezeToTagger() async {
+    if (_lastTaggerGeo == null || _myLastGeo == null || _currentTaggerId == null) {
+      throw Exception('鬼の位置を取得できませんでした');
+    }
+    final distance = Geolocator.distanceBetween(
+      _myLastGeo!.latitude,
+      _myLastGeo!.longitude,
+      _lastTaggerGeo!.latitude,
+      _lastTaggerGeo!.longitude,
+    );
+    if (distance > 5) {
+      throw Exception('鬼の近くにいません');
+    }
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) {
+      throw Exception('ゲームIDが不明です');
+    }
+    final firestore = FirebaseFirestore.instance;
+    final taggerRef = firestore
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('players')
+        .doc(_currentTaggerId);
+
+    await firestore.runTransaction((tx) async {
+      final snap = await tx.get(taggerRef);
+      if (!snap.exists) {
+        throw Exception('鬼のデータが見つかりません');
+      }
+      final now = DateTime.now();
+      tx.update(taggerRef, {
+        'freezeOrigin': GeoPoint(_lastTaggerGeo!.latitude, _lastTaggerGeo!.longitude),
+        'freezeUntil': Timestamp.fromDate(now.add(const Duration(seconds: 5))),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    });
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('鬼を5秒間フリーズさせました')),
+      );
+    }
+  }
+
+  Future<void> _deployTrap() async {
+    if (_myLastGeo == null) {
+      throw Exception('現在地を取得できません');
+    }
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) {
+      throw Exception('ゲームIDが不明です');
+    }
+    final playerId = widget.args.currentUserId;
+    final firestore = FirebaseFirestore.instance;
+    final trapDoc = await _findOwnedItemDoc(
+      gameId: gameId,
+      playerId: playerId,
+      type: 'TRAP',
+    );
+    if (trapDoc == null) {
+      throw Exception('配置できるトラップがありません');
+    }
+
+    await firestore.runTransaction((tx) async {
+      tx.update(trapDoc, {
+        'state': _ItemStates.armed,
+        'lat': _myLastGeo!.latitude,
+        'lng': _myLastGeo!.longitude,
+        'armedAt': FieldValue.serverTimestamp(),
+        'armedBy': playerId,
+      });
+      final playerRef = firestore
+          .collection('gameSessions')
+          .doc(gameId)
+          .collection('players')
+          .doc(playerId);
+      final snap = await tx.get(playerRef);
+      final items =
+          List<String>.from((snap.data()?['items'] as List<dynamic>?) ?? const []);
+      final removed = items.remove('TRAP');
+      if (removed) {
+        tx.update(playerRef, {
+          'items': items,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+    });
+
+    if (mounted) {
+      setState(() {
+        _items.remove('TRAP');
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('トラップを設置しました')),
+      );
+    }
+  }
+
+  Future<void> _markUsedItemDoc(
+    String gameId,
+    String playerId,
+    String itemType,
+  ) async {
+    final query = await FirebaseFirestore.instance
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('items')
+        .where('type', isEqualTo: itemType)
+        .where('pickedBy', isEqualTo: playerId)
+        .limit(1)
+        .get();
+    if (query.docs.isEmpty) return;
+    await query.docs.first.reference.update({
+      'state': 'USED',
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<DocumentReference<Map<String, dynamic>>?> _findOwnedItemDoc({
+    required String gameId,
+    required String playerId,
+    required String type,
+  }) async {
+    final query = await FirebaseFirestore.instance
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('items')
+        .where('type', isEqualTo: type)
+        .where('pickedBy', isEqualTo: playerId)
+        .where('state', isEqualTo: _ItemStates.picked)
+        .limit(1)
+        .get();
+    if (query.docs.isEmpty) return null;
+    return query.docs.first.reference;
+  }
+
+  Future<bool> _removeItemFromPlayerDoc({
+    required String gameId,
+    required String playerId,
+    required String itemType,
+  }) async {
+    final firestore = FirebaseFirestore.instance;
+    final playerRef = firestore
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('players')
+        .doc(playerId);
+
+    return firestore.runTransaction((tx) async {
+      final snap = await tx.get(playerRef);
+      if (!snap.exists) return false;
+      final items =
+          List<String>.from((snap.data()?['items'] as List<dynamic>?) ?? const []);
+      final removed = items.remove(itemType);
+      if (removed) {
+        tx.update(playerRef, {
+          'items': items,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+      return removed;
+    });
+  }
+
+  Future<void> _consumeItemForRunner({
+    required String gameId,
+    required String playerId,
+    required String itemType,
+  }) async {
+    final removed = await _removeItemFromPlayerDoc(
+      gameId: gameId,
+      playerId: playerId,
+      itemType: itemType,
+    );
+    if (removed) {
+      await _markUsedItemDoc(gameId, playerId, itemType);
+    }
+  }
+
+  Future<void> _triggerTrap(_GameItem trap) async {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    final playerId = widget.args.currentUserId;
+    if (gameId == null || gameId.isEmpty) return;
+    if (_isCurrentlyFrozen) return;
+
+    final firestore = FirebaseFirestore.instance;
+    final trapRef = firestore
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('items')
+        .doc(trap.itemId);
+    final playerRef = firestore
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('players')
+        .doc(playerId);
+
+    await firestore.runTransaction((tx) async {
+      final trapSnap = await tx.get(trapRef);
+      if (!trapSnap.exists) return;
+      final trapState = trapSnap.data()?['state'] as String? ?? '';
+      if (trapState != _ItemStates.armed) return;
+      final now = DateTime.now();
+      tx.update(trapRef, {
+        'state': _ItemStates.used,
+        'triggeredBy': playerId,
+        'triggeredAt': Timestamp.fromDate(now),
+      });
+      tx.update(playerRef, {
+        'freezeOrigin': GeoPoint(trap.lat, trap.lng),
+        'freezeUntil': Timestamp.fromDate(now.add(const Duration(seconds: 5))),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    });
+
+    if (mounted) {
+      setState(() {
+        _freezeOrigin = GeoPoint(trap.lat, trap.lng);
+        _freezeUntil = DateTime.now().add(const Duration(seconds: 5));
+        _freezePopupShown = false;
+        _armedTraps.removeWhere((t) => t.itemId == trap.itemId);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('トラップにかかりました！5秒間動けません')),
+      );
+    }
+  }
+
+  Future<LatLng> _maybeApplyTaggerFakeLocation({
+    required LatLng realPosition,
+    required String taggerId,
+  }) async {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) {
+      return realPosition;
+    }
+    final removed = await _removeItemFromPlayerDoc(
+      gameId: gameId,
+      playerId: taggerId,
+      itemType: 'FAKE_LOCATION_TAGGER',
+    );
+    if (!removed) {
+      return realPosition;
+    }
+    await _markUsedItemDoc(gameId, taggerId, 'FAKE_LOCATION_TAGGER');
+    return _generateFakeLocation(realPosition);
+  }
+
+  LatLng _generateFakeLocation(LatLng base) {
+    const minMeters = 30.0;
+    const maxMeters = 80.0;
+    final distance = minMeters + _random.nextDouble() * (maxMeters - minMeters);
+    final bearing = _random.nextDouble() * 2 * pi;
+    final deltaLatMeters = distance * cos(bearing);
+    final deltaLngMeters = distance * sin(bearing);
+    const metersPerDegree = 111320.0;
+    final deltaLat = deltaLatMeters / metersPerDegree;
+    final cosLat = cos(base.latitude * pi / 180).abs();
+    final lngScale = cosLat < 0.0001 ? 0.0001 : cosLat;
+    final deltaLng = deltaLngMeters / (metersPerDegree * lngScale);
+    final fakeLat = base.latitude + deltaLat;
+    final fakeLng = base.longitude + deltaLng;
+    return LatLng(fakeLat, fakeLng);
+  }
+
+  Future<void> _pickupItem(_GameItem item) async {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) return;
+    final playerId = widget.args.currentUserId;
+    final firestore = FirebaseFirestore.instance;
+    final gameRef = firestore.collection('gameSessions').doc(gameId);
+    final playerRef = gameRef.collection('players').doc(playerId);
+    final itemRef = gameRef.collection('items').doc(item.itemId);
+
+    try {
+      await firestore.runTransaction((tx) async {
+        final playerSnap = await tx.get(playerRef);
+        final itemSnap = await tx.get(itemRef);
+        if (!playerSnap.exists || !itemSnap.exists) {
+          throw Exception('データを取得できませんでした');
+        }
+        final itemData = itemSnap.data();
+        if ((itemData?['state'] as String?) != 'AVAILABLE') {
+          throw Exception('このアイテムは取得済みです');
+        }
+
+        final existing =
+            List<String>.from((playerSnap.data()?['items'] as List<dynamic>?) ?? const []);
+        if (existing.length >= 2) {
+          throw Exception('これ以上アイテムを持てません');
+        }
+
+        existing.add(item.type);
+
+        tx.update(playerRef, {
+          'items': existing,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+        tx.update(itemRef, {
+          'state': 'PICKED',
+          'pickedBy': playerId,
+          'pickedAt': FieldValue.serverTimestamp(),
+        });
+      });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${_itemLabelByType(item.type)}を入手しました')),
+      );
+    } catch (e, s) {
+      debugPrint('Failed to pickup item: $e\n$s');
+    }
+  }
+
+  bool _itemVisibleToRole(_GameItem item, String role) {
+    if (item.visibility == 'TAGGER' && role != 'TAGGER') {
+      return false;
+    }
+    if (item.visibility == 'RUNNER' && role != 'RUNNER') {
+      return false;
+    }
+    return true;
+  }
+
+  String _effectiveRole(String? snapshotRole) {
+    if (snapshotRole == null || snapshotRole == 'PENDING') {
+      switch (_role) {
+        case PartyMemberRole.tagger:
+          return 'TAGGER';
+        case PartyMemberRole.runner:
+          return 'RUNNER';
+        case PartyMemberRole.pending:
+          return 'PENDING';
+      }
+    }
+    return snapshotRole;
+  }
+
     void _updateCatchAvailability({
   required GeoPoint? myGeo,
   required String? myRole,
@@ -311,19 +1316,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
 }) {
   // Firestore側のロールが PENDING でも、
   // ロビー情報 (_role) が鬼なら TAGGER とみなす
-  String effectiveRole;
-
-  if (myRole == null || myRole == 'PENDING') {
-    if (_role == PartyMemberRole.tagger) {
-      effectiveRole = 'TAGGER';
-    } else if (_role == PartyMemberRole.runner) {
-      effectiveRole = 'RUNNER';
-    } else {
-      effectiveRole = 'PENDING';
-    }
-  } else {
-    effectiveRole = myRole;
-  }
+  final effectiveRole = _effectiveRole(myRole);
 
   // デバッグ用ログ
   debugPrint(
@@ -410,7 +1403,18 @@ class _RoomGamePageState extends State<RoomGamePage> {
         'caughtBy': widget.args.currentUserId,
       });
     }
-    final myName = _players.firstWhere((p) => p.isMe).name;
+    final myName = _players.firstWhere(
+      (p) => p.isMe,
+      orElse: () => const _PlayerInfo(
+        id: '',
+        name: '不明なプレイヤー',
+        position: LatLng(0, 0),
+        role: '',
+        isMe: true,
+        inside: false,
+        caught: false,
+      ),
+    ).name;
     await _sendNotification('確保！', '$myName が逃走者を捕まえました！');
     if (mounted) {
       setState(() {
@@ -432,7 +1436,8 @@ class _RoomGamePageState extends State<RoomGamePage> {
     for (final p in players) {
       // 色をロールで分ける
       if (p.isMe) continue;
-
+      // 捕まったプレイヤーは表示しない
+      if (p.caught) continue;
       double hue;
       if (p.role == 'TAGGER') {
         hue = BitmapDescriptor.hueRed;
@@ -454,10 +1459,36 @@ class _RoomGamePageState extends State<RoomGamePage> {
     }
 
     setState(() {
-      _markers
+      _playerMarkers
         ..clear()
         ..addAll(newMarkers);
+      _refreshCombinedMarkers();
     });
+  }
+
+  void _refreshCombinedMarkers() {
+    _markers
+      ..clear()
+      ..addAll(_playerMarkers)
+      ..addAll(_itemMarkers)
+      ..addAll(_effectMarkers);
+  }
+
+  void _checkTrapCollision(LatLng current, String effectiveRole) {
+    if (effectiveRole != 'RUNNER') return;
+    if (_armedTraps.isEmpty) return;
+    for (final trap in _armedTraps) {
+      final distance = Geolocator.distanceBetween(
+        current.latitude,
+        current.longitude,
+        trap.lat,
+        trap.lng,
+      );
+      if (distance <= 5) {
+        _triggerTrap(trap);
+        break;
+      }
+    }
   }
 // Future<void> _handleTagLogic({
 //   required GeoPoint? myGeo,
@@ -561,12 +1592,20 @@ class _RoomGamePageState extends State<RoomGamePage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('現在地はエリア外です')),
       );
-      final myName = _players.firstWhere(
-        (p) => p.isMe, 
-        orElse: () => _PlayerInfo(id: '', name: '誰か', position: LatLng(0,0), role: '', isMe: true, inside: false, caught: false)
-      ).name;
-      
-      _sendNotification('エリア外警告', '$myName さんがエリア外に出ました！');
+      String myName = 'プレイヤー';
+      try {
+        // 1. 最新のロビー情報があればそれを使う
+        // 2. なければ画面遷移時に受け取ったロビー情報を使う
+        final currentLobby = _latestLobby ?? widget.args.lobby;
+        
+        final me = currentLobby.allMembers.firstWhere(
+          (m) => m.userId == widget.args.currentUserId,
+        );
+        myName = me.name;
+      } catch (e) {
+        debugPrint('名前の取得に失敗しました: $e');
+      }
+     await _sendNotification('エリア外警告', '$myName さんがエリア外に出ました！');
     } else if (inside) {
       // エリア内に戻ったら通知状態をリセット
       _outsideNotified = false;
@@ -582,6 +1621,8 @@ class _RoomGamePageState extends State<RoomGamePage> {
 
     _posSub?.cancel();
     _playersSub?.cancel();
+    _itemsSub?.cancel();
+    _revealTimer?.cancel();
     final gameId = widget.args.lobby.gameId;
     if (gameId != null) {
       FirebaseMessaging.instance.unsubscribeFromTopic('game_$gameId');
@@ -629,17 +1670,54 @@ class _RoomGamePageState extends State<RoomGamePage> {
   }
 
   void _listenToGameSession() {
-    final gameId = widget.args.lobby.gameId;
-    if (gameId == null) {
-      debugPrint('No gameId on lobby; cannot sync time.');
-      return;
-    }
-    _gameSessionSub = _partyService.watchGameSession(gameId).listen((session) {
-      if (!mounted) return;
-      setState(() => _gameSession = session);
-      _updateTimeFromSession();
-    });
+  final gameId = widget.args.lobby.gameId;
+  if (gameId == null) {
+    debugPrint('No gameId on lobby; cannot sync time.');
+    return;
   }
+  _gameSessionSub =
+      _partyService.watchGameSession(gameId).listen((session) {
+    if (!mounted) return;
+    setState(() => _gameSession = session);
+    _updateTimeFromSession();
+
+    final status = session?.status;
+
+    if (!_navigatedByGameEnd && status != null) {
+      if (status == 'FINISHED') {
+        _navigatedByGameEnd = true;
+
+        // ★ 勝敗判定
+        final taggersWin = _allRunnersCaught;
+        final myRole = _role;
+        final isMyTeamWin =
+            (taggersWin && myRole == PartyMemberRole.tagger) ||
+            (!taggersWin && myRole == PartyMemberRole.runner);
+
+        Navigator.of(context).pushNamedAndRemoveUntil(
+          AppRoutes.gameOver,   // ← 既存のルートをそのまま利用
+          (route) => false,
+          arguments: GameOverPageArgs(
+            lobby: _latestLobby ?? widget.args.lobby,
+            currentUserId: widget.args.currentUserId,
+            gameId: widget.args.gameId,
+            taggersWin: taggersWin,
+            isMyTeamWin: isMyTeamWin,
+            capturedCount: _capturedCount,
+            totalRunners: _totalRunners,
+          ),
+        );
+      } else if (status == 'ABORTED') {
+        // 中断時はとりあえずホームに戻す
+        _navigatedByGameEnd = true;
+        Navigator.of(context).pushNamedAndRemoveUntil(
+          AppRoutes.home,
+          (route) => false,
+        );
+      }
+    }
+  });
+}
 
   // ★修正: 時間計算ロジック
   void _updateTimeFromSession() {
@@ -661,7 +1739,17 @@ class _RoomGamePageState extends State<RoomGamePage> {
       final maxSeconds = session.durationMinutes * 60;
       remaining = remaining.clamp(0, maxSeconds);
     }
-
+    if (_isHost) {
+    final status = session.status;
+    if (status != 'FINISHED' && (remaining <= 0 || _allRunnersCaught)) {
+      // タイムアップ or 全員確保 なのにまだ FINISHED でなければ更新する
+      _partyService.updateGameStatus(
+        gameId: widget.args.gameId,
+        status: 'FINISHED',
+        partyId: widget.args.lobby.partyId,
+      );
+    }
+  }
     // カウントダウン（鬼の待機時間）の計算
     var countdown = 0;
     var showGo = _showGo;
@@ -755,6 +1843,47 @@ class _RoomGamePageState extends State<RoomGamePage> {
     }
   }
 
+Future<void> _debugCatchAllRunners() async {
+  final lobby = _latestLobby ?? widget.args.lobby;
+  final gameId = lobby.gameId;
+  if (gameId == null || gameId.isEmpty) return;
+
+  // ホスト以外は念のため弾く
+  if (!_isHost) return;
+
+  try {
+    final batch = FirebaseFirestore.instance.batch();
+    for (final p in _players) {
+      if (p.role != 'RUNNER') continue;
+      final ref = FirebaseFirestore.instance
+          .collection('gameSessions')
+          .doc(gameId)
+          .collection('players')
+          .doc(p.id);
+      batch.update(ref, {
+        'caught': true,
+        'caughtAt': FieldValue.serverTimestamp(),
+        'caughtBy': widget.args.currentUserId,
+      });
+    }
+    await batch.commit();
+
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('デバッグ：全員捕まえました')),
+    );
+
+    // ★ここでゲーム終了まで進めてみる
+    await _endGameForAll();
+
+  } catch (e) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('デバッグ全員捕獲に失敗しました: $e')),
+    );
+  }
+}
   Future<void> _loadFieldPolygon() async {
     try {
       final polygon =
@@ -815,9 +1944,9 @@ class _RoomGamePageState extends State<RoomGamePage> {
       return const SizedBox.shrink();
     }
 
-    final totalPlayers = widget.args.lobby.memberCount;
+    final totalRunners = _totalRunners;
     final remainingPlayers =
-        (totalPlayers - _capturedCount).clamp(0, totalPlayers).toInt();
+        (totalRunners - _capturedCount).clamp(0, totalRunners);
 
     return Scaffold(
       backgroundColor: Colors.grey.shade100,
@@ -917,7 +2046,80 @@ class _RoomGamePageState extends State<RoomGamePage> {
                     ],
                   ),
                 ),
-
+                // ★追加：捕まったときのモックアップオーバーレイ
+                if (_showCaughtOverlay)
+                  Positioned.fill(
+                    child: Container(
+                      color: Colors.black.withOpacity(0.5),
+                      child: Align(
+                        alignment: const Alignment(0, -0.2), // ← ★ ここで位置調整（-1.0 〜 +1.0）
+                        child: Container(
+                          width: MediaQuery.of(context).size.width * 0.8,
+                          padding: const EdgeInsets.all(24),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.2),
+                                blurRadius: 12,
+                                offset: const Offset(0, 6),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.sentiment_dissatisfied,
+                                size: 70,
+                                color: Colors.redAccent,
+                              ),
+                              const SizedBox(height: 16),
+                              const Text(
+                                'あなたは捕まってしまいました！',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              const Text(
+                                'ゲームが終わるまで、他のプレイヤーを観戦できます。',
+                                textAlign: TextAlign.center,
+                              ),
+                              const SizedBox(height: 24),
+                              SizedBox(
+                                width: double.infinity,
+                                child: FilledButton(
+                                  style: FilledButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(vertical: 14),
+                                    backgroundColor: _palette.accent,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                  ),
+                                  onPressed: () {
+                                    setState(() {
+                                      _showCaughtOverlay = false;
+                                    });
+                                  },
+                                  child: const Text(
+                                    '観戦する',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 // ④ 既存のUI（タイマーやステータス）
                 SafeArea(
                   child: Padding(
@@ -936,18 +2138,68 @@ class _RoomGamePageState extends State<RoomGamePage> {
                           accent: _palette.accent,
                         ),
                         const Spacer(),
+            
+                        if (_iAmCaught) ...[
+                          Container(
+                            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                            margin: const EdgeInsets.only(bottom: 8),
+                            decoration: BoxDecoration(
+                              color: Colors.red.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: const Text(
+                              'あなたは捕まりました（観戦モード）',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.redAccent,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
+
+                        if (_role == PartyMemberRole.tagger && !_iAmCaught) ...[
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: _GaugeAbilityButton(
+                              progress: _taggerGauge.clamp(0.0, 1.0),
+                              enabled: _taggerGauge >= 1 && !_isListeningAbilityActive,
+                              onPressed: _triggerListenAbility,
+                              label: 'リッスン',
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                        ],
+
                         _StatsBar(
                           accent: _palette.accent,
                           capturedCount: _capturedCount,
                           remainingPlayers: remainingPlayers,
                           items: _items,
+                          itemLabelResolver: _itemLabelByType,
+                          canUseItems: !_iAmCaught,
+                          itemEnabledResolver: _isItemEnabled,
+                          onItemPressed: _handleItemPressed,
                         ),
+
+                        // 鬼の Catch ボタン
                         if (_role == PartyMemberRole.tagger) ...[
                           const SizedBox(height: 12),
                           _CatchButton(
                             accent: _palette.accent,
-                            enabled: _canCatch,     // ★ 近くに相手がいるときだけ有効
+                            enabled: _canCatch,
                             onPressed: _onCatchPressed,
+                          ),
+                        ],
+
+                        if (_isHost && kDebugMode) ...[
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            width: double.infinity,
+                            child: OutlinedButton(
+                              onPressed: _debugCatchAllRunners,
+                              child: const Text('【デバッグ】全員捕まえた状態にする'),
+                            ),
                           ),
                         ],
                       ],
@@ -1139,12 +2391,20 @@ class _StatsBar extends StatelessWidget {
   final int capturedCount;
   final int remainingPlayers;
   final List<String> items;
+  final bool canUseItems;
+  final ValueChanged<String>? onItemPressed;
+  final String Function(String) itemLabelResolver;
+  final bool Function(String) itemEnabledResolver;
 
   const _StatsBar({
     required this.accent,
     required this.capturedCount,
     required this.remainingPlayers,
     required this.items,
+    required this.itemLabelResolver,
+    required this.itemEnabledResolver,
+    this.canUseItems = false,
+    this.onItemPressed,
   });
 
   @override
@@ -1197,13 +2457,22 @@ class _StatsBar extends StatelessWidget {
               runSpacing: 8,
               children: visibleItems
                   .map(
-                    (item) => Chip(
-                      label: Text(item),
-                      backgroundColor: accent.withOpacity(0.12),
+                    (item) => ActionChip(
+                      label: Text(itemLabelResolver(item)),
+                      backgroundColor: accent.withOpacity(
+                        canUseItems && itemEnabledResolver(item) ? 0.2 : 0.08,
+                      ),
                       labelStyle: TextStyle(
-                        color: accent,
+                        color: canUseItems && itemEnabledResolver(item)
+                            ? accent
+                            : Colors.black45,
                         fontWeight: FontWeight.bold,
                       ),
+                      onPressed: canUseItems &&
+                              itemEnabledResolver(item) &&
+                              onItemPressed != null
+                          ? () => onItemPressed!(item)
+                          : null,
                     ),
                   )
                   .toList(),
@@ -1228,6 +2497,83 @@ class _StatsBar extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _GaugeAbilityButton extends StatelessWidget {
+  final double progress;
+  final bool enabled;
+  final VoidCallback onPressed;
+  final String label;
+
+  const _GaugeAbilityButton({
+    required this.progress,
+    required this.enabled,
+    required this.onPressed,
+    required this.label,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const size = 80.0;
+    final activeColor = const Color.fromARGB(255, 70, 156, 248);
+    final inactiveColor = Colors.tealAccent.withOpacity(0.35);
+    final baseGlow = Colors.teal.withOpacity(0.25);
+    final borderColor = enabled ? Colors.white : Colors.white60;
+    return Column(
+      children: [
+        GestureDetector(
+          onTap: enabled ? onPressed : null,
+          child: SizedBox(
+            width: size,
+            height: size,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Container(
+                  width: size,
+                  height: size,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: baseGlow,
+                    border: Border.all(color: borderColor, width: 2),
+                    boxShadow: [
+                      BoxShadow(
+                        color: activeColor.withOpacity(enabled ? 0.6 : 0.2),
+                        blurRadius: 12,
+                        spreadRadius: 1,
+                      ),
+                    ],
+                  ),
+                ),
+                CircularProgressIndicator(
+                  value: progress.clamp(0.0, 1.0),
+                  strokeWidth: 6,
+                  backgroundColor: Colors.white24,
+                  valueColor: AlwaysStoppedAnimation<Color>(
+                    enabled ? activeColor : inactiveColor,
+                  ),
+                ),
+                Icon(
+                  Icons.radar,
+                  color: enabled ? Colors.white : Colors.white70,
+                  size: 32,
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.white.withOpacity(enabled ? 0.95 : 0.65),
+            fontWeight: FontWeight.bold,
+            letterSpacing: 0.5,
+          ),
+        ),
+      ],
     );
   }
 }

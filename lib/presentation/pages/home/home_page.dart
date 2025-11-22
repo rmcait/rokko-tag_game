@@ -9,6 +9,11 @@ import 'home_viewmodel.dart';
 class HomePage extends StatelessWidget {
   const HomePage({super.key});
 
+  // ログイン画面と世界観を合わせるカラー
+  static const _accentPurple = Color(0xFF6A4CD3);
+  static const _softYellow = Color(0xFFFFF7DA);      // AppBar やアイコン背景
+  static const _cardBg = Color(0xFFFFFDF5);          // カードの背景
+
   Future<void> _startRoomCreation(BuildContext context) async {
     final viewModel = context.read<HomeViewModel>();
     final user = viewModel.currentUser;
@@ -33,9 +38,19 @@ class HomePage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Colors.white,
       appBar: AppBar(
-        title: const Text('鬼ごっこ'),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        elevation: 0,
+        backgroundColor: _softYellow,
+        foregroundColor: Colors.black87,
+        centerTitle: true,
+        title: const Text(
+          '鬼ごっこ',
+          style: TextStyle(
+            fontWeight: FontWeight.w700,
+            letterSpacing: 2,
+          ),
+        ),
         actions: [
           // ログアウトボタン
           IconButton(
@@ -56,68 +71,38 @@ class HomePage extends StatelessWidget {
           final user = viewModel.currentUser;
 
           return Padding(
-            padding: const EdgeInsets.all(24.0),
+            padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // ユーザー情報カード
-                Card(
-                  elevation: 2,
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Row(
-                      children: [
-                        // プロフィール画像
-                        CircleAvatar(
-                          radius: 30,
-                          backgroundImage: user?.photoUrl != null
-                              ? NetworkImage(user!.photoUrl!)
-                              : null,
-                          child: user?.photoUrl == null
-                              ? const Icon(Icons.person, size: 30)
-                              : null,
-                        ),
-                        const SizedBox(width: 16),
-                        // ユーザー情報
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                user?.displayName ?? 'ゲスト',
-                                style: const TextStyle(
-                                  fontSize: 20,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                user?.email ?? '匿名ユーザー',
-                                style: const TextStyle(
-                                  fontSize: 14,
-                                  color: Colors.grey,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+                // ───── ユーザー情報カード ─────
+                _ProfileCard(
+                  displayName: user?.displayName ?? 'ゲスト',
+                  email: user?.email ?? '匿名ユーザー',
+                  photoUrl: user?.photoUrl,
                 ),
                 const SizedBox(height: 32),
 
-                // メニューボタン
+                // ───── メニュー見出し ─────
                 const Text(
                   'メニュー',
                   style: TextStyle(
                     fontSize: 24,
-                    fontWeight: FontWeight.bold,
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 8),
+                Container(
+                  width: 64,
+                  height: 3,
+                  decoration: BoxDecoration(
+                    color: _accentPurple.withOpacity(0.4),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                ),
+                const SizedBox(height: 20),
 
-                // ルーム作成ボタン
+                // ───── メニューボタン ─────
                 _MenuButton(
                   icon: Icons.add_circle_outline,
                   title: 'ルームを作成',
@@ -125,8 +110,6 @@ class HomePage extends StatelessWidget {
                   onTap: () => _startRoomCreation(context),
                 ),
                 const SizedBox(height: 12),
-
-                // ルーム参加ボタン
                 _MenuButton(
                   icon: Icons.group_add,
                   title: 'ルームに参加',
@@ -139,6 +122,130 @@ class HomePage extends StatelessWidget {
             ),
           );
         },
+      ),
+    );
+  }
+}
+
+/// ユーザー情報カード（プロフィールを少し正方形寄り＋装飾）
+class _ProfileCard extends StatelessWidget {
+  final String displayName;
+  final String email;
+  final String? photoUrl;
+
+  const _ProfileCard({
+    required this.displayName,
+    required this.email,
+    this.photoUrl,
+  });
+
+  static const _accentPurple = Color(0xFF6A4CD3);
+  static const _softYellow = Color(0xFFFFF7DA);
+  static const _cardBg = Color(0xFFFFFDF5);
+
+  @override
+  Widget build(BuildContext context) {
+    final initial = displayName.isNotEmpty ? displayName.characters.first : 'ゲ';
+
+    return Container(
+      decoration: BoxDecoration(
+        color: _cardBg,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.06),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        children: [
+          // 正方形寄りのアイコン枠
+          Container(
+            width: 68,
+            height: 68,
+            decoration: BoxDecoration(
+              color: _softYellow,
+              borderRadius: BorderRadius.circular(18),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: photoUrl != null
+                  ? Image.network(
+                      photoUrl!,
+                      fit: BoxFit.cover,
+                    )
+                  : Center(
+                      child: Text(
+                        initial,
+                        style: const TextStyle(
+                          fontSize: 26,
+                          fontWeight: FontWeight.w700,
+                          color: _accentPurple,
+                        ),
+                      ),
+                    ),
+            ),
+          ),
+          const SizedBox(width: 16),
+          // ユーザー情報＋タグ
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  displayName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  email,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: Colors.grey,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: _accentPurple.withOpacity(0.08),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.circle,
+                        size: 8,
+                        color: Colors.green,
+                      ),
+                      SizedBox(width: 6),
+                      Text(
+                        'オンライン',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: _accentPurple,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -158,30 +265,38 @@ class _MenuButton extends StatelessWidget {
     required this.onTap,
   });
 
+  static const _accentPurple = Color(0xFF6A4CD3);
+  static const _softYellow = Color(0xFFFFF7DA);
+  static const _cardBg = Color(0xFFFFFDF5);
+
   @override
   Widget build(BuildContext context) {
-    return Card(
+    return Material(
+      color: _cardBg,
       elevation: 2,
+      borderRadius: BorderRadius.circular(18),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(18),
         child: Padding(
           padding: const EdgeInsets.all(16.0),
           child: Row(
             children: [
+              // 左のアイコンバッジ（黄色＋紫）
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: Colors.deepPurple.shade50,
-                  borderRadius: BorderRadius.circular(12),
+                  color: _softYellow,
+                  borderRadius: BorderRadius.circular(16),
                 ),
                 child: Icon(
                   icon,
-                  size: 32,
-                  color: Colors.deepPurple,
+                  size: 28,
+                  color: _accentPurple,
                 ),
               ),
               const SizedBox(width: 16),
+              // テキスト
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -189,22 +304,26 @@ class _MenuButton extends StatelessWidget {
                     Text(
                       title,
                       style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       subtitle,
                       style: const TextStyle(
-                        fontSize: 14,
+                        fontSize: 13,
                         color: Colors.grey,
                       ),
                     ),
                   ],
                 ),
               ),
-              const Icon(Icons.arrow_forward_ios, size: 20),
+              const Icon(
+                Icons.arrow_forward_ios,
+                size: 18,
+                color: Colors.black45,
+              ),
             ],
           ),
         ),

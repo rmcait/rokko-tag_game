@@ -345,7 +345,7 @@ class PartyService {
     if (seedMockMembersIfNeeded && desiredMockCount > 0) {
       await ensureMockMembers(
         lobby.partyId,
-        desiredCount: desiredMockCount,
+        // desiredCount: desiredMockCount,
       );
     }
 
@@ -354,7 +354,7 @@ class PartyService {
 
   Future<void> ensureMockMembers(
     String partyId, {
-    int desiredCount = 3,
+    int desiredCount = 2,
   }) async {
     final docRef = _parties.doc(partyId);
     final membersRef = docRef.collection('members');
@@ -492,6 +492,25 @@ class PartyService {
     return _partyLobbyFromSnapshots(partyDoc, membersSnap.docs);
   }
   Future<String> startGame(PartyLobbyData lobby) async {
+    final partyRef = _parties.doc(lobby.partyId);
+    final partySnapshot = await partyRef.get();
+    final partyData = partySnapshot.data();
+    final polygon = _parsePolygonPoints(
+      partyData?['area']?['polygon'] as List<dynamic>?,
+    );
+    final seed = (partyData?['itemSeed'] as String?) ?? lobby.partyId;
+    final runnerItems = _generateInitialItemsForGame(
+      polygon: polygon,
+      seed: '$seed-runner',
+      types: _runnerItemTypes,
+    );
+    final taggerItems = _generateInitialItemsForGame(
+      polygon: polygon,
+      seed: '$seed-tagger',
+      types: _taggerItemTypes,
+    );
+    final initialItems = [...runnerItems, ...taggerItems];
+
     final batch = _firestore.batch();
 
     // 1. gameSessions ドキュメントを作成 (DB定義書 2.3)
@@ -522,13 +541,28 @@ class PartyService {
         'role': member.role.code,
         'status': 'ACTIVE',
         'caught': false,
+        'inside': true, // ★★★ これを追加！
         'createdAt': FieldValue.serverTimestamp(),
+      });
+    }
+
+    // 2.5 ゲーム開始時に初期アイテムをスポーン (database.md 参照)
+    for (final item in initialItems) {
+      final itemRef = gameRef.collection('items').doc(item.itemId);
+      batch.set(itemRef, {
+        'itemId': item.itemId,
+        'type': item.type,
+        'visibility': item.visibility,
+        'lat': item.lat,
+        'lng': item.lng,
+        'spawnedAt': FieldValue.serverTimestamp(),
+        'pickedBy': null,
+        'state': 'AVAILABLE',
       });
     }
 
     // 3. parties の status を IN_PROGRESS に更新し gameId を紐付け
     // これにより StreamBuilder が反応して全員遷移する
-    final partyRef = _parties.doc(lobby.partyId);
     batch.update(partyRef, {
       'status': 'IN_PROGRESS',
       'gameId': gameId,
@@ -646,5 +680,195 @@ class PartyService {
       }
     }
     return points;
+  }
+
+  List<LatLng> _parsePolygonPoints(List<dynamic>? rawPolygon) {
+    if (rawPolygon == null) {
+      return const [];
+    }
+    final points = <LatLng>[];
+    for (final point in rawPolygon) {
+      final lat = (point['lat'] as num?)?.toDouble();
+      final lng = (point['lng'] as num?)?.toDouble();
+      if (lat != null && lng != null) {
+        points.add(LatLng(lat, lng));
+      }
+    }
+    return points;
+  }
+
+  List<_GeneratedItem> _generateInitialItemsForGame({
+    required List<LatLng> polygon,
+    required String seed,
+    required List<String> types,
+  }) {
+    final fieldPolygon = polygon.isNotEmpty ? polygon : _defaultFieldPolygon();
+    final bounds = _PolygonBounds.fromPolygon(fieldPolygon);
+    final random = Random(seed.hashCode);
+
+    final items = <_GeneratedItem>[];
+    for (final type in types) {
+      final point = _randomPointInsidePolygon(
+        random: random,
+        bounds: bounds,
+        polygon: fieldPolygon,
+      );
+      final visibility = _itemVisibilityByType[type] ?? _defaultItemVisibility;
+      items.add(
+        _GeneratedItem(
+          itemId: _generateItemId(random),
+          type: type,
+          visibility: visibility,
+          lat: point.latitude,
+          lng: point.longitude,
+        ),
+      );
+    }
+    return items;
+  }
+
+  LatLng _randomPointInsidePolygon({
+    required Random random,
+    required _PolygonBounds bounds,
+    required List<LatLng> polygon,
+  }) {
+    for (var attempt = 0; attempt < 30; attempt++) {
+      final lat =
+          bounds.minLat + random.nextDouble() * bounds.latDelta;
+      final lng =
+          bounds.minLng + random.nextDouble() * bounds.lngDelta;
+      if (_isPointInsidePolygon(lat, lng, polygon)) {
+        return LatLng(lat, lng);
+      }
+    }
+    // フォールバック: 多角形の重心を使う
+    return _polygonCentroid(polygon);
+  }
+
+  bool _isPointInsidePolygon(double lat, double lng, List<LatLng> polygon) {
+    var inside = false;
+    for (int i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      final xi = polygon[i].latitude;
+      final yi = polygon[i].longitude;
+      final xj = polygon[j].latitude;
+      final yj = polygon[j].longitude;
+
+      final intersect = ((yi > lng) != (yj > lng)) &&
+          (lat <
+              (xj - xi) * (lng - yi) / ((yj - yi) == 0 ? 1e-9 : (yj - yi)) +
+                  xi);
+      if (intersect) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  LatLng _polygonCentroid(List<LatLng> polygon) {
+    var latSum = 0.0;
+    var lngSum = 0.0;
+    for (final point in polygon) {
+      latSum += point.latitude;
+      lngSum += point.longitude;
+    }
+    final count = polygon.isEmpty ? 1 : polygon.length;
+    return LatLng(latSum / count, lngSum / count);
+  }
+
+  List<LatLng> _defaultFieldPolygon() {
+    const baseLat = 35.681236;
+    const baseLng = 139.767125;
+    const delta = 0.0005;
+    return [
+      const LatLng(baseLat, baseLng),
+      const LatLng(baseLat, baseLng + delta),
+      const LatLng(baseLat + delta, baseLng + delta),
+      const LatLng(baseLat + delta, baseLng),
+    ];
+  }
+
+  String _generateItemId(Random random) {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    final buffer = StringBuffer('itm_');
+    for (var i = 0; i < 10; i++) {
+      buffer.write(chars[random.nextInt(chars.length)]);
+    }
+    return buffer.toString();
+  }
+}
+
+const _defaultItemVisibility = 'RUNNER';
+
+const List<String> _runnerItemTypes = [
+  'SEE_TAGGER',
+  'FAKE_LOCATION',
+  'FREEZE_TAGGER',
+];
+
+const List<String> _taggerItemTypes = [
+  'TRAP',
+  'FAKE_LOCATION_TAGGER',
+];
+
+const Map<String, String> _itemVisibilityByType = {
+  'SEE_TAGGER': 'RUNNER',
+  'FAKE_LOCATION': 'RUNNER',
+  'FREEZE_TAGGER': 'RUNNER',
+  'TRAP': 'TAGGER',
+  'FREEZE_ALL': 'TAGGER',
+  'FAKE_LOCATION_TAGGER': 'TAGGER',
+};
+
+class _GeneratedItem {
+  final String itemId;
+  final String type;
+  final String visibility;
+  final double lat;
+  final double lng;
+
+  const _GeneratedItem({
+    required this.itemId,
+    required this.type,
+    required this.visibility,
+    required this.lat,
+    required this.lng,
+  });
+}
+
+class _PolygonBounds {
+  final double minLat;
+  final double maxLat;
+  final double minLng;
+  final double maxLng;
+
+  const _PolygonBounds({
+    required this.minLat,
+    required this.maxLat,
+    required this.minLng,
+    required this.maxLng,
+  });
+
+  double get latDelta => (maxLat - minLat).abs().clamp(1e-6, double.infinity);
+  double get lngDelta => (maxLng - minLng).abs().clamp(1e-6, double.infinity);
+
+  factory _PolygonBounds.fromPolygon(List<LatLng> polygon) {
+    double minLat = polygon.first.latitude;
+    double maxLat = polygon.first.latitude;
+    double minLng = polygon.first.longitude;
+    double maxLng = polygon.first.longitude;
+
+    for (final point in polygon) {
+      if (point.latitude < minLat) minLat = point.latitude;
+      if (point.latitude > maxLat) maxLat = point.latitude;
+      if (point.longitude < minLng) minLng = point.longitude;
+      if (point.longitude > maxLng) maxLng = point.longitude;
+    }
+
+    return _PolygonBounds(
+      minLat: minLat,
+      maxLat: maxLat,
+      minLng: minLng,
+      maxLng: maxLng,
+    );
   }
 }
