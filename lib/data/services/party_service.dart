@@ -345,7 +345,7 @@ class PartyService {
     if (seedMockMembersIfNeeded && desiredMockCount > 0) {
       await ensureMockMembers(
         lobby.partyId,
-        desiredCount: desiredMockCount,
+        // desiredCount: desiredMockCount,
       );
     }
 

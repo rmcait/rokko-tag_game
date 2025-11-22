@@ -4,5 +4,5 @@ class AppConstants {
   static const appName = 'Tag Game';
   static const mockApiDelay = Duration(milliseconds: 300);
   static const bool seedLobbyWithMockMembers = true;
-  static const int lobbyMockMemberCount = 3;
+  static const int lobbyMockMemberCount = 2;
 }
