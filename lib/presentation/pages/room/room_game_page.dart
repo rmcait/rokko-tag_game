@@ -648,26 +648,54 @@ class _RoomGamePageState extends State<RoomGamePage> {
   }
 
   void _listenToGameSession() {
-    final gameId = widget.args.lobby.gameId;
-    if (gameId == null) {
-      debugPrint('No gameId on lobby; cannot sync time.');
-      return;
-    }
-    _gameSessionSub = _partyService.watchGameSession(gameId).listen((session) {
-      if (!mounted) return;
-      setState(() => _gameSession = session);
-      _updateTimeFromSession();
+  final gameId = widget.args.lobby.gameId;
+  if (gameId == null) {
+    debugPrint('No gameId on lobby; cannot sync time.');
+    return;
+  }
+  _gameSessionSub =
+      _partyService.watchGameSession(gameId).listen((session) {
+    if (!mounted) return;
+    setState(() => _gameSession = session);
+    _updateTimeFromSession();
 
-      if ((session?.status == 'FINISHED' || session?.status == 'ABORTED') &&
-        !_navigatedByGameEnd) {
+    final status = session?.status;
+
+    if (!_navigatedByGameEnd && status != null) {
+      if (status == 'FINISHED') {
+        _navigatedByGameEnd = true;
+
+        // ★ 勝敗判定
+        final taggersWin = _allRunnersCaught;
+        final myRole = _role;
+        final isMyTeamWin =
+            (taggersWin && myRole == PartyMemberRole.tagger) ||
+            (!taggersWin && myRole == PartyMemberRole.runner);
+
+        Navigator.of(context).pushNamedAndRemoveUntil(
+          AppRoutes.gameOver,   // ← 既存のルートをそのまま利用
+          (route) => false,
+          arguments: GameOverPageArgs(
+            lobby: _latestLobby ?? widget.args.lobby,
+            currentUserId: widget.args.currentUserId,
+            gameId: widget.args.gameId,
+            taggersWin: taggersWin,
+            isMyTeamWin: isMyTeamWin,
+            capturedCount: _capturedCount,
+            totalRunners: _totalRunners,
+          ),
+        );
+      } else if (status == 'ABORTED') {
+        // 中断時はとりあえずホームに戻す
         _navigatedByGameEnd = true;
         Navigator.of(context).pushNamedAndRemoveUntil(
           AppRoutes.home,
           (route) => false,
         );
       }
-    });
-  }
+    }
+  });
+}
 
   // ★修正: 時間計算ロジック
   void _updateTimeFromSession() {
