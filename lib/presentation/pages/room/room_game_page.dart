@@ -107,6 +107,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
   final List<_GameItem> _gameItems = [];
   bool _isPickingItem = false;
   bool _isUsingItem = false;
+  bool _freezeReady = false;
 
   late PartyMemberRole _role;
   late _RolePalette _palette;
@@ -132,8 +133,12 @@ class _RoomGamePageState extends State<RoomGamePage> {
   final Set<Marker> _playerMarkers = {};
   final Set<Marker> _itemMarkers = {};
   final Set<Marker> _effectMarkers = {};
-  Marker? _revealedTaggerMarker;
   Timer? _revealTimer;
+  GeoPoint? _lastTaggerGeo;
+  String? _currentTaggerId;
+  GeoPoint? _taggerFreezeOrigin;
+  DateTime? _taggerFreezeUntil;
+  bool _freezePopupShown = false;
   Set<Polygon> _fieldPolygons = {};
   List<_PlayerInfo> get _otherPlayers =>
       _players.where((p) => !p.isMe && !p.caught).toList();
@@ -143,6 +148,12 @@ class _RoomGamePageState extends State<RoomGamePage> {
   bool _iAmCaught = false;
   bool _showCaughtOverlay = false;
   int _ntpOffset = 0;
+
+  bool get _isCurrentlyFrozen {
+    final until = _taggerFreezeUntil;
+    if (until == null) return false;
+    return _now.isBefore(until);
+  }
 
   bool get _isHost {
     final lobby = _latestLobby ?? widget.args.lobby;
@@ -302,6 +313,27 @@ class _RoomGamePageState extends State<RoomGamePage> {
   ).listen((pos) async {
     final current = LatLng(pos.latitude, pos.longitude);
 
+    final effectiveRole = _effectiveRole(_myRoleCode);
+    if (effectiveRole == 'TAGGER' && _isCurrentlyFrozen && _taggerFreezeOrigin != null) {
+      final freezeDistance = Geolocator.distanceBetween(
+        _taggerFreezeOrigin!.latitude,
+        _taggerFreezeOrigin!.longitude,
+        current.latitude,
+        current.longitude,
+      );
+      if (freezeDistance > 5) {
+        if (!_freezePopupShown && mounted) {
+          _freezePopupShown = true;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('現在フリーズ中のため動けません')),
+          );
+        }
+        return;
+      }
+    } else if (_freezePopupShown) {
+      _freezePopupShown = false;
+    }
+
       setState(() {
         _currentLatLng = current;
       });
@@ -348,6 +380,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
       String? myRole;
       bool myCaught = false;
       List<String>? myItemsList;
+      GeoPoint? taggerGeo;
 
       for (final doc in snapshot.docs) {
         final data = doc.data();
@@ -361,12 +394,30 @@ class _RoomGamePageState extends State<RoomGamePage> {
         final name =
             data['displayName'] as String? ?? 'Player ${doc.id.substring(0, 4)}';
 
+        if (role == 'TAGGER') {
+          taggerGeo = geo;
+          _currentTaggerId = doc.id;
+        }
+
         if (isMe) {
           myGeo = geo;
           myRole = role;
           myCaught = caught;
           final rawItems = (data['items'] as List<dynamic>?) ?? const [];
           myItemsList = rawItems.cast<String>();
+          if (role == 'TAGGER') {
+            final freezeUntil = (data['freezeUntil'] as Timestamp?)?.toDate();
+            final freezeOrigin = data['freezeOrigin'] as GeoPoint?;
+            _taggerFreezeUntil = freezeUntil;
+            _taggerFreezeOrigin = freezeOrigin;
+            if (!_isCurrentlyFrozen) {
+              _freezePopupShown = false;
+            }
+          } else {
+            _taggerFreezeUntil = null;
+            _taggerFreezeOrigin = null;
+            _freezePopupShown = false;
+          }
         }
 
         players.add(
@@ -422,6 +473,19 @@ class _RoomGamePageState extends State<RoomGamePage> {
     if (!mounted) return;
 
     // 状態更新
+    final hasFreezeItem =
+        (myItemsList ?? const <String>[]).contains('FREEZE_TAGGER');
+    final freezeReady = hasFreezeItem &&
+        myGeo != null &&
+        taggerGeo != null &&
+        Geolocator.distanceBetween(
+              myGeo.latitude,
+              myGeo.longitude,
+              taggerGeo.latitude,
+              taggerGeo.longitude,
+            ) <=
+            5;
+
     setState(() {
       _players
         ..clear()
@@ -433,6 +497,8 @@ class _RoomGamePageState extends State<RoomGamePage> {
       _items
         ..clear()
         ..addAll(myItemsList ?? const []);
+      _freezeReady = freezeReady;
+      _lastTaggerGeo = taggerGeo;
     });
 
     // マーカー描画を更新
@@ -528,6 +594,16 @@ class _RoomGamePageState extends State<RoomGamePage> {
     }
   }
   
+  bool _isItemEnabled(String type) {
+    if (_role != PartyMemberRole.runner || _iAmCaught) {
+      return false;
+    }
+    if (type == 'FREEZE_TAGGER') {
+      return _freezeReady;
+    }
+    return true;
+  }
+
   Future<void> _tryPickupNearbyItems(LatLng current) async {
     if (_isPickingItem) return;
     final role = _effectiveRole(_myRoleCode);
@@ -569,6 +645,12 @@ class _RoomGamePageState extends State<RoomGamePage> {
     if (!_items.contains(itemType)) {
       return;
     }
+    if (!_isItemEnabled(itemType)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('条件を満たしていません')),
+      );
+      return;
+    }
     if (_isUsingItem) {
       return;
     }
@@ -581,6 +663,9 @@ class _RoomGamePageState extends State<RoomGamePage> {
       switch (itemType) {
         case 'SEE_TAGGER':
           await _revealTaggerLocation();
+          break;
+        case 'FREEZE_TAGGER':
+          await _applyFreezeToTagger();
           break;
         default:
           if (!mounted) break;
@@ -689,7 +774,55 @@ class _RoomGamePageState extends State<RoomGamePage> {
     if (mounted) {
       setState(() {
         _items.remove(itemType);
+        if (itemType == 'FREEZE_TAGGER') {
+          _freezeReady = false;
+        }
       });
+    }
+  }
+
+  Future<void> _applyFreezeToTagger() async {
+    if (_lastTaggerGeo == null || _myLastGeo == null || _currentTaggerId == null) {
+      throw Exception('鬼の位置を取得できませんでした');
+    }
+    final distance = Geolocator.distanceBetween(
+      _myLastGeo!.latitude,
+      _myLastGeo!.longitude,
+      _lastTaggerGeo!.latitude,
+      _lastTaggerGeo!.longitude,
+    );
+    if (distance > 5) {
+      throw Exception('鬼の近くにいません');
+    }
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) {
+      throw Exception('ゲームIDが不明です');
+    }
+    final firestore = FirebaseFirestore.instance;
+    final taggerRef = firestore
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('players')
+        .doc(_currentTaggerId);
+
+    await firestore.runTransaction((tx) async {
+      final snap = await tx.get(taggerRef);
+      if (!snap.exists) {
+        throw Exception('鬼のデータが見つかりません');
+      }
+      final now = DateTime.now();
+      tx.update(taggerRef, {
+        'freezeOrigin': GeoPoint(_lastTaggerGeo!.latitude, _lastTaggerGeo!.longitude),
+        'freezeUntil': Timestamp.fromDate(now.add(const Duration(seconds: 5))),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    });
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('鬼を5秒間フリーズさせました')),
+      );
     }
   }
 
@@ -1617,6 +1750,7 @@ Future<void> _debugCatchAllRunners() async {
                           items: _items,
                           itemLabelResolver: _itemLabelByType,
                           canUseItems: _role == PartyMemberRole.runner && !_iAmCaught,
+                          itemEnabledResolver: _isItemEnabled,
                           onItemPressed: _handleItemPressed,
                         ),
 
@@ -1832,6 +1966,7 @@ class _StatsBar extends StatelessWidget {
   final bool canUseItems;
   final ValueChanged<String>? onItemPressed;
   final String Function(String) itemLabelResolver;
+  final bool Function(String) itemEnabledResolver;
 
   const _StatsBar({
     required this.accent,
@@ -1839,6 +1974,7 @@ class _StatsBar extends StatelessWidget {
     required this.remainingPlayers,
     required this.items,
     required this.itemLabelResolver,
+    required this.itemEnabledResolver,
     this.canUseItems = false,
     this.onItemPressed,
   });
@@ -1896,13 +2032,17 @@ class _StatsBar extends StatelessWidget {
                     (item) => ActionChip(
                       label: Text(itemLabelResolver(item)),
                       backgroundColor: accent.withOpacity(
-                        canUseItems ? 0.2 : 0.08,
+                        canUseItems && itemEnabledResolver(item) ? 0.2 : 0.08,
                       ),
                       labelStyle: TextStyle(
-                        color: canUseItems ? accent : Colors.black45,
+                        color: canUseItems && itemEnabledResolver(item)
+                            ? accent
+                            : Colors.black45,
                         fontWeight: FontWeight.bold,
                       ),
-                      onPressed: canUseItems && onItemPressed != null
+                      onPressed: canUseItems &&
+                              itemEnabledResolver(item) &&
+                              onItemPressed != null
                           ? () => onItemPressed!(item)
                           : null,
                     ),
