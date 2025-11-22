@@ -254,65 +254,87 @@ class _RoomGamePageState extends State<RoomGamePage> {
     });
   }
     void _updateCatchAvailability({
-    required GeoPoint? myGeo,
-    required String? myRole,
-    required QuerySnapshot<Map<String, dynamic>> snapshot,
-  }) {
-    // 自分の位置 or 役割が不明、もしくは鬼じゃない → キャッチ不可
-    if (myGeo == null || myRole != 'TAGGER') {
-      if (mounted) {
-        setState(() {
-          _canCatch = false;
-          _nearRunnerRefs.clear();
-        });
-      }
+  required GeoPoint? myGeo,
+  required String? myRole,
+  required QuerySnapshot<Map<String, dynamic>> snapshot,
+}) {
+  // Firestore側のロールが PENDING でも、
+  // ロビー情報 (_role) が鬼なら TAGGER とみなす
+  String effectiveRole;
 
-    debugPrint('[CATCH] not tagger or no position: myRole=$myRole myGeo=$myGeo');
-    
-      return;
+  if (myRole == null || myRole == 'PENDING') {
+    if (_role == PartyMemberRole.tagger) {
+      effectiveRole = 'TAGGER';
+    } else if (_role == PartyMemberRole.runner) {
+      effectiveRole = 'RUNNER';
+    } else {
+      effectiveRole = 'PENDING';
     }
+  } else {
+    effectiveRole = myRole;
+  }
 
-    const touchThresholdMeters = 8.0; // ★ 距離はここで調整（今は8m）
+  // デバッグ用ログ
+  debugPrint(
+      '[CATCH] myRoleFromPlayers=$myRole lobbyRole=$_role effectiveRole=$effectiveRole myGeo=$myGeo');
 
-    final nearRunners = <DocumentReference<Map<String, dynamic>>>[];
-
-    for (final doc in snapshot.docs) {
-      if (doc.id == widget.args.currentUserId) continue;
-
-      final data = doc.data();
-      final role = data['role'] as String?;
-      if (role != 'RUNNER') continue;
-
-      final caught = (data['caught'] as bool?) ?? false;
-      if (caught) continue;
-
-      final geo = data['lastLocation'] as GeoPoint?;
-      if (geo == null) continue;
-
-      final distance = Geolocator.distanceBetween(
-        myGeo.latitude,
-        myGeo.longitude,
-        geo.latitude,
-        geo.longitude,
-      );
-
-    debugPrint('[CATCH] candidate=${doc.id} role=$role distance=$distance caught=$caught');
-
-      if (distance <= touchThresholdMeters) {
-        nearRunners.add(doc.reference);
-      }
-    }
-
+  // 自分の位置 or 役割が不明、もしくは鬼じゃない → キャッチ不可
+  if (myGeo == null || effectiveRole != 'TAGGER') {
     if (mounted) {
       setState(() {
-        _canCatch = nearRunners.isNotEmpty;
-        _nearRunnerRefs
-          ..clear()
-          ..addAll(nearRunners);
+        _canCatch = false;
+        _nearRunnerRefs.clear();
       });
     }
-    debugPrint('[CATCH] canCatch=$_canCatch nearRunners=${nearRunners.length}');
+
+    debugPrint(
+        '[CATCH] not tagger or no position: effectiveRole=$effectiveRole myGeo=$myGeo');
+    return;
   }
+
+  const touchThresholdMeters = 20.0; // ★ 距離はここで調整（今は8m）
+
+  final nearRunners = <DocumentReference<Map<String, dynamic>>>[];
+
+  for (final doc in snapshot.docs) {
+    if (doc.id == widget.args.currentUserId) continue;
+
+    final data = doc.data();
+    final role = data['role'] as String?;
+    if (role != 'RUNNER') continue;
+
+    final caught = (data['caught'] as bool?) ?? false;
+    if (caught) continue;
+
+    final geo = data['lastLocation'] as GeoPoint?;
+    if (geo == null) continue;
+
+    final distance = Geolocator.distanceBetween(
+      myGeo.latitude,
+      myGeo.longitude,
+      geo.latitude,
+      geo.longitude,
+    );
+
+    debugPrint(
+        '[CATCH] candidate=${doc.id} role=$role distance=$distance caught=$caught');
+
+    if (distance <= touchThresholdMeters) {
+      nearRunners.add(doc.reference);
+    }
+  }
+
+  if (mounted) {
+    setState(() {
+      _canCatch = nearRunners.isNotEmpty;
+      _nearRunnerRefs
+        ..clear()
+        ..addAll(nearRunners);
+    });
+  }
+  debugPrint(
+      '[CATCH] result canCatch=$_canCatch nearRunners=${nearRunners.length}');
+}
 
     Future<void> _onCatchPressed() async {
     // 念のためチェック
@@ -383,62 +405,6 @@ class _RoomGamePageState extends State<RoomGamePage> {
         ..addAll(newMarkers);
     });
   }
-Future<void> _handleTagLogic({
-  required GeoPoint? myGeo,
-  required String? myRole,
-  required bool myCaught,
-  required QuerySnapshot<Map<String, dynamic>> snapshot,
-}) async {
-  if (myGeo == null || myRole == null) return;
-
-  // 逃走側が捕まったときの通知（1回だけ）
-  if (myRole == 'RUNNER' && myCaught && !_alreadyNotifiedCaught) {
-    _alreadyNotifiedCaught = true;
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('捕まってしまいました…！')),
-      );
-    }
-  }
-
-  // 鬼以外はここで終了
-  if (myRole != 'TAGGER') return;
-
-  const touchThresholdMeters = 8.0;
-
-  for (final doc in snapshot.docs) {
-    if (doc.id == widget.args.currentUserId) continue;
-
-    final data = doc.data();
-    final role = data['role'] as String?;
-    if (role != 'RUNNER') continue;
-    final gameData = data['gameData'] as Map<String, dynamic>?;
-      if (gameData == null) continue;
-
-      final caught = (gameData['caught'] as bool?) ?? false;
-      if (caught) continue;
-
-      final geo = gameData['lastLocation'] as GeoPoint?;
-      if (geo == null) continue;
-    
-
-    final distance = Geolocator.distanceBetween(
-      myGeo.latitude,
-      myGeo.longitude,
-      geo.latitude,
-      geo.longitude,
-    );
-
-    if (distance <= touchThresholdMeters) {
-      // ★ 捕まえた！
-      await doc.reference.update({
-        'caught': true,
-        'caughtAt': FieldValue.serverTimestamp(),
-        'caughtBy': widget.args.currentUserId,
-      });
-    }
-  }
-}
 // Future<void> _handleTagLogic({
 //   required GeoPoint? myGeo,
 //   required String? myRole,
