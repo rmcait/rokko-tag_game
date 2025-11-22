@@ -345,7 +345,7 @@ class PartyService {
     if (seedMockMembersIfNeeded && desiredMockCount > 0) {
       await ensureMockMembers(
         lobby.partyId,
-        desiredCount: desiredMockCount,
+        // desiredCount: desiredMockCount,
       );
     }
 
@@ -354,7 +354,7 @@ class PartyService {
 
   Future<void> ensureMockMembers(
     String partyId, {
-    int desiredCount = 3,
+    int desiredCount = 2,
   }) async {
     final docRef = _parties.doc(partyId);
     final membersRef = docRef.collection('members');

@@ -6,9 +6,10 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../../data/services/party_service.dart';
 import '../../routes.dart';
-
+import 'game_over_page.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:ntp/ntp.dart'; // ★追加
+import 'package:ntp/ntp.dart'; 
+import 'package:flutter/foundation.dart'; // ★追加：kDebugMode でデバッグ時だけボタンを出す
 import 'package:turf/turf.dart' as turf;
 class RoomGamePageArgs {
   final PartyLobbyData lobby;
@@ -76,6 +77,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
   bool _showGo = false;
 
   int _capturedCount = 0;
+  int _totalRunners = 0; 
   final List<String> _items = [];
   late int _remainingSeconds;
   String? _initErrorMessage;
@@ -87,10 +89,70 @@ class _RoomGamePageState extends State<RoomGamePage> {
   final Set<Marker> _markers = {};
   Set<Polygon> _fieldPolygons = {};
   List<_PlayerInfo> get _otherPlayers =>
-        _players.where((p) => !p.isMe).toList();
+      _players.where((p) => !p.isMe && !p.caught).toList();
   List<LatLng> _fieldPoints = [];
   bool _outsideNotified = false;
+  bool _navigatedByGameEnd = false;
+  bool _iAmCaught = false;
+  bool _showCaughtOverlay = false;
   int _ntpOffset = 0;
+
+  bool get _isHost {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    return lobby.owner.userId == widget.args.currentUserId;
+  }
+
+  bool get _allRunnersCaught {
+    // プレイヤーからRUNNERだけを取り出す
+    final runners = _players.where((p) => p.role == 'RUNNER').toList();
+    if (runners.isEmpty) return false;
+    // 全員 caught == true なら true
+    return runners.every((p) => p.caught);
+  }
+
+  bool get _canHostEndGame {
+    // タイムアップ or 全RUNNER確保
+    return _remainingSeconds <= 0 || _allRunnersCaught;
+  }
+  Future<void> _endGameForAll() async {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+
+    if (gameId == null || gameId.isEmpty) return;
+
+    // 念のためホスト以外は弾く
+    if (!_isHost) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('ホストだけがゲーム終了できます')),
+        );
+      }
+      return;
+    }
+
+    try {
+      await _partyService.updateGameStatus(
+        gameId: gameId,
+        status: 'FINISHED',
+        partyId: lobby.partyId,
+      );
+      // 自分も即ホームに戻る（他の人は watch で自動遷移）
+      if (mounted && !_navigatedByGameEnd) {
+        _navigatedByGameEnd = true;
+        Navigator.of(context).pushNamedAndRemoveUntil(
+          AppRoutes.home,
+          (route) => false,
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('ゲーム終了に失敗しました: $e')),
+      );
+    }
+  }
+
+
   @override
   void initState() {
     super.initState();
@@ -218,17 +280,42 @@ class _RoomGamePageState extends State<RoomGamePage> {
         );
       }
 
-      final captured = players.where((p) => p.caught).length;
+    final totalRunners =
+          players.where((p) => p.role == 'RUNNER').length;
+    final captured =
+          players.where((p) => p.role == 'RUNNER' && p.caught).length;
 
     // ★ 逃走側が捕まったときの通知（1回だけ）
     if (myRole == 'RUNNER' && myCaught && !_alreadyNotifiedCaught) {
       _alreadyNotifiedCaught = true;
-      if (mounted) {
+      if (!mounted) return;
+
+        setState(() {
+          _iAmCaught = true;        // ← 観戦モードに入ったことを覚えておく
+          _showCaughtOverlay = true;  // ← オーバーレイ表示フラグを立てる
+        });
+
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('捕まってしまいました…！')),
         );
       }
-    }
+      // if (mounted) {
+      //   ScaffoldMessenger.of(context).showSnackBar(
+      //     const SnackBar(content: Text('捕まってしまいました…！')),
+      //   );
+      //   //Game Over時の画面遷移
+      //   Future.microtask(() {
+      //     if (!mounted) return;
+      //     Navigator.of(context).pushReplacementNamed(
+      //       AppRoutes.gameOver, // ←あなたのルート名に合わせて変更
+      //       arguments: GameOverPageArgs(
+      //         lobby: _latestLobby ?? widget.args.lobby,
+      //         gameId: widget.args.gameId,
+      //         currentUserId: widget.args.currentUserId,
+      //       ),
+      //     );
+      //   });
+      //}
 
     if (!mounted) return;
 
@@ -239,7 +326,8 @@ class _RoomGamePageState extends State<RoomGamePage> {
         ..addAll(players);
       _myLastGeo = myGeo;
       _myRoleCode = myRole;
-      _capturedCount = captured;
+      _totalRunners = totalRunners;   // ★追加
+      _capturedCount = captured;  
     });
 
     // マーカー描画を更新
@@ -378,7 +466,8 @@ class _RoomGamePageState extends State<RoomGamePage> {
     for (final p in players) {
       // 色をロールで分ける
       if (p.isMe) continue;
-
+      // 捕まったプレイヤーは表示しない
+      if (p.caught) continue;
       double hue;
       if (p.role == 'TAGGER') {
         hue = BitmapDescriptor.hueRed;
@@ -562,17 +651,54 @@ class _RoomGamePageState extends State<RoomGamePage> {
   }
 
   void _listenToGameSession() {
-    final gameId = widget.args.lobby.gameId;
-    if (gameId == null) {
-      debugPrint('No gameId on lobby; cannot sync time.');
-      return;
-    }
-    _gameSessionSub = _partyService.watchGameSession(gameId).listen((session) {
-      if (!mounted) return;
-      setState(() => _gameSession = session);
-      _updateTimeFromSession();
-    });
+  final gameId = widget.args.lobby.gameId;
+  if (gameId == null) {
+    debugPrint('No gameId on lobby; cannot sync time.');
+    return;
   }
+  _gameSessionSub =
+      _partyService.watchGameSession(gameId).listen((session) {
+    if (!mounted) return;
+    setState(() => _gameSession = session);
+    _updateTimeFromSession();
+
+    final status = session?.status;
+
+    if (!_navigatedByGameEnd && status != null) {
+      if (status == 'FINISHED') {
+        _navigatedByGameEnd = true;
+
+        // ★ 勝敗判定
+        final taggersWin = _allRunnersCaught;
+        final myRole = _role;
+        final isMyTeamWin =
+            (taggersWin && myRole == PartyMemberRole.tagger) ||
+            (!taggersWin && myRole == PartyMemberRole.runner);
+
+        Navigator.of(context).pushNamedAndRemoveUntil(
+          AppRoutes.gameOver,   // ← 既存のルートをそのまま利用
+          (route) => false,
+          arguments: GameOverPageArgs(
+            lobby: _latestLobby ?? widget.args.lobby,
+            currentUserId: widget.args.currentUserId,
+            gameId: widget.args.gameId,
+            taggersWin: taggersWin,
+            isMyTeamWin: isMyTeamWin,
+            capturedCount: _capturedCount,
+            totalRunners: _totalRunners,
+          ),
+        );
+      } else if (status == 'ABORTED') {
+        // 中断時はとりあえずホームに戻す
+        _navigatedByGameEnd = true;
+        Navigator.of(context).pushNamedAndRemoveUntil(
+          AppRoutes.home,
+          (route) => false,
+        );
+      }
+    }
+  });
+}
 
   // ★修正: 時間計算ロジック
   void _updateTimeFromSession() {
@@ -594,7 +720,17 @@ class _RoomGamePageState extends State<RoomGamePage> {
       final maxSeconds = session.durationMinutes * 60;
       remaining = remaining.clamp(0, maxSeconds);
     }
-
+    if (_isHost) {
+    final status = session.status;
+    if (status != 'FINISHED' && (remaining <= 0 || _allRunnersCaught)) {
+      // タイムアップ or 全員確保 なのにまだ FINISHED でなければ更新する
+      _partyService.updateGameStatus(
+        gameId: widget.args.gameId,
+        status: 'FINISHED',
+        partyId: widget.args.lobby.partyId,
+      );
+    }
+  }
     // カウントダウン（鬼の待機時間）の計算
     var countdown = 0;
     var showGo = _showGo;
@@ -688,6 +824,47 @@ class _RoomGamePageState extends State<RoomGamePage> {
     }
   }
 
+Future<void> _debugCatchAllRunners() async {
+  final lobby = _latestLobby ?? widget.args.lobby;
+  final gameId = lobby.gameId;
+  if (gameId == null || gameId.isEmpty) return;
+
+  // ホスト以外は念のため弾く
+  if (!_isHost) return;
+
+  try {
+    final batch = FirebaseFirestore.instance.batch();
+    for (final p in _players) {
+      if (p.role != 'RUNNER') continue;
+      final ref = FirebaseFirestore.instance
+          .collection('gameSessions')
+          .doc(gameId)
+          .collection('players')
+          .doc(p.id);
+      batch.update(ref, {
+        'caught': true,
+        'caughtAt': FieldValue.serverTimestamp(),
+        'caughtBy': widget.args.currentUserId,
+      });
+    }
+    await batch.commit();
+
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('デバッグ：全員捕まえました')),
+    );
+
+    // ★ここでゲーム終了まで進めてみる
+    await _endGameForAll();
+
+  } catch (e) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('デバッグ全員捕獲に失敗しました: $e')),
+    );
+  }
+}
   Future<void> _loadFieldPolygon() async {
     try {
       final polygon =
@@ -748,9 +925,9 @@ class _RoomGamePageState extends State<RoomGamePage> {
       return const SizedBox.shrink();
     }
 
-    final totalPlayers = widget.args.lobby.memberCount;
+    final totalRunners = _totalRunners;
     final remainingPlayers =
-        (totalPlayers - _capturedCount).clamp(0, totalPlayers).toInt();
+        (totalRunners - _capturedCount).clamp(0, totalRunners);
 
     return Scaffold(
       backgroundColor: Colors.grey.shade100,
@@ -850,7 +1027,80 @@ class _RoomGamePageState extends State<RoomGamePage> {
                     ],
                   ),
                 ),
-
+                // ★追加：捕まったときのモックアップオーバーレイ
+                if (_showCaughtOverlay)
+                  Positioned.fill(
+                    child: Container(
+                      color: Colors.black.withOpacity(0.5),
+                      child: Align(
+                        alignment: const Alignment(0, -0.2), // ← ★ ここで位置調整（-1.0 〜 +1.0）
+                        child: Container(
+                          width: MediaQuery.of(context).size.width * 0.8,
+                          padding: const EdgeInsets.all(24),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.2),
+                                blurRadius: 12,
+                                offset: const Offset(0, 6),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.sentiment_dissatisfied,
+                                size: 70,
+                                color: Colors.redAccent,
+                              ),
+                              const SizedBox(height: 16),
+                              const Text(
+                                'あなたは捕まってしまいました！',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              const Text(
+                                'ゲームが終わるまで、他のプレイヤーを観戦できます。',
+                                textAlign: TextAlign.center,
+                              ),
+                              const SizedBox(height: 24),
+                              SizedBox(
+                                width: double.infinity,
+                                child: FilledButton(
+                                  style: FilledButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(vertical: 14),
+                                    backgroundColor: _palette.accent,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                  ),
+                                  onPressed: () {
+                                    setState(() {
+                                      _showCaughtOverlay = false;
+                                    });
+                                  },
+                                  child: const Text(
+                                    '観戦する',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 // ④ 既存のUI（タイマーやステータス）
                 SafeArea(
                   child: Padding(
@@ -869,18 +1119,51 @@ class _RoomGamePageState extends State<RoomGamePage> {
                           accent: _palette.accent,
                         ),
                         const Spacer(),
+            
+                        if (_iAmCaught) ...[
+                          Container(
+                            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                            margin: const EdgeInsets.only(bottom: 8),
+                            decoration: BoxDecoration(
+                              color: Colors.red.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: const Text(
+                              'あなたは捕まりました（観戦モード）',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.redAccent,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
+
                         _StatsBar(
                           accent: _palette.accent,
                           capturedCount: _capturedCount,
                           remainingPlayers: remainingPlayers,
                           items: _items,
                         ),
+
+                        // 鬼の Catch ボタン
                         if (_role == PartyMemberRole.tagger) ...[
                           const SizedBox(height: 12),
                           _CatchButton(
                             accent: _palette.accent,
-                            enabled: _canCatch,     // ★ 近くに相手がいるときだけ有効
+                            enabled: _canCatch,
                             onPressed: _onCatchPressed,
+                          ),
+                        ],
+
+                        if (_isHost && kDebugMode) ...[
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            width: double.infinity,
+                            child: OutlinedButton(
+                              onPressed: _debugCatchAllRunners,
+                              child: const Text('【デバッグ】全員捕まえた状態にする'),
+                            ),
                           ),
                         ],
                       ],
@@ -1346,3 +1629,5 @@ class _RolePalette {
     }
   }
 }
+
+
