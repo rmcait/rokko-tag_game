@@ -160,8 +160,8 @@ class _RoomGamePageState extends State<RoomGamePage> {
         'inside': true,
         'updatedAt': FieldValue.serverTimestamp(),
       },
-        SetOptions(merge: true),
-      );
+      SetOptions(merge: true),
+    );
 
       _checkFieldBoundary(current);
     });
@@ -297,12 +297,15 @@ Future<void> _handleTagLogic({
     final data = doc.data();
     final role = data['role'] as String?;
     if (role != 'RUNNER') continue;
+    final gameData = data['gameData'] as Map<String, dynamic>?;
+      if (gameData == null) continue;
 
-    final caught = (data['caught'] as bool?) ?? false;
-    if (caught) continue;
+      final caught = (gameData['caught'] as bool?) ?? false;
+      if (caught) continue;
 
-    final geo = data['lastLocation'] as GeoPoint?;
-    if (geo == null) continue;
+      final geo = gameData['lastLocation'] as GeoPoint?;
+      if (geo == null) continue;
+    
 
     final distance = Geolocator.distanceBetween(
       myGeo.latitude,
