@@ -11,6 +11,9 @@ import 'package:turf/turf.dart' as turf;
 import '../room/room_lobby_page.dart';
 import '../room/room_lobby_mapper.dart';
 
+const _appBarBg = Color(0xFFFFF7DA);
+const _appBarText = Color(0xFF424242);
+
 class MapPageArgs {
   final List<LatLng>? initialPoints;
   final bool isEditing;
@@ -257,18 +260,24 @@ class _MapPageState extends State<MapPage> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 FloatingActionButton.small(
+                  backgroundColor: Color(0xFFFFF7DA),
+                  foregroundColor: Color(0xFF505050),
                   heroTag: 'zoom_in',
                   onPressed: _onZoomIn,
                   child: const Icon(Icons.add),
                 ),
                 const SizedBox(height: 8),
                 FloatingActionButton.small(
+                  backgroundColor: Color(0xFFFFF7DA),
+                  foregroundColor: Color(0xFF505050),
                   heroTag: 'zoom_out',
                   onPressed: _onZoomOut,
                   child: const Icon(Icons.remove),
                 ),
                 const SizedBox(height: 8),
                 FloatingActionButton.small(
+                  backgroundColor: Color(0xFFFFF7DA),
+                  foregroundColor: Color(0xFF505050),
                   heroTag: 'check_position',
                   onPressed: _checkAreaStatus,
                   tooltip: 'エリア内判定',
@@ -283,7 +292,17 @@ class _MapPageState extends State<MapPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('フィールドを設定'),
+        elevation: 0,
+        backgroundColor: _appBarBg,
+        iconTheme: const IconThemeData(color: _appBarText),
+        title: const Text(
+          'フィールドを設定',
+          style: TextStyle(
+            color: _appBarText,
+            fontSize: 18,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
         actions: [
           IconButton(
             onPressed: _isLoading ? null : _loadCurrentLocation,
@@ -312,6 +331,9 @@ class _MapPageState extends State<MapPage> {
                         onPressed: _undoLastPoint,
                         icon: const Icon(Icons.undo),
                         label: const Text('最後の頂点を取り消す'),
+                        style: TextButton.styleFrom(
+                          foregroundColor: _appBarText,
+                        ),
                       ),
                     ),
                   ElevatedButton.icon(
@@ -325,8 +347,15 @@ class _MapPageState extends State<MapPage> {
                               : 'フィールドの頂点を4点タップしてください（${_points.length}/4）'),
                     ),
                     style: ElevatedButton.styleFrom(
+                      backgroundColor:
+                          canConfirm ? _appBarBg : Colors.grey.shade300,
+                      foregroundColor:
+                          canConfirm ? _appBarText : Colors.grey.shade700,
                       padding: const EdgeInsets.symmetric(vertical: 16),
                       minimumSize: const Size.fromHeight(48),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(24),
+                      ),
                     ),
                   ),
                 ],
@@ -370,6 +399,7 @@ class _MapPageState extends State<MapPage> {
               children: [
                 Checkbox(
                   value: _saveAsTemplate,
+                  activeColor: Color(0xFFF5C14E), 
                   onChanged: (v) {
                     setState(() {
                       _saveAsTemplate = v ?? false;

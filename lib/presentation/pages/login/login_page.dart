@@ -170,41 +170,6 @@ class _LoginPageState extends State<LoginPage>
                                 ),
                                 const SizedBox(height: 18),
 
-                                // ゲストログイン（アクセント色ボタン）
-                                SizedBox(
-                                  width: double.infinity,
-                                  height: 56,
-                                  child: FilledButton.icon(
-                                    onPressed: () async {
-                                      final user = await viewModel
-                                          .signInAnonymously();
-                                      if (user != null && context.mounted) {
-                                        Navigator.pushReplacementNamed(
-                                            context, '/home');
-                                      }
-                                    },
-                                    icon: const Icon(Icons.person_outline),
-                                    label: const Text(
-                                      'ゲストとしてログイン',
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        fontSize: 15,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                    style: FilledButton.styleFrom(
-                                      backgroundColor: const Color(0xFFBEE3F8),
-                                      foregroundColor: Colors.white,
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 16),
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius:
-                                            BorderRadius.circular(20),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-
                                 // エラー表示
                                 if (viewModel.errorMessage != null) ...[
                                   const SizedBox(height: 16),
