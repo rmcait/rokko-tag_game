@@ -222,12 +222,27 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
     setState(() => _isStartingGame = true);
     try {
       if (!mounted) return;
+
+      // Create game session and items client-side (no Cloud Functions)
+      String? gameId;
+      try {
+        gameId = await _partyService.startGame(lobby.partyId);
+        debugPrint('Started game: $gameId');
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('ゲームの開始に失敗しました: $e')),
+        );
+        return;
+      }
+
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => RoomGamePage(
             args: RoomGamePageArgs(
               lobby: lobby,
               currentUserId: widget.args.currentUserId,
+              gameId: gameId,
             ),
           ),
         ),

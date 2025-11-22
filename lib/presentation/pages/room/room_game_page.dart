@@ -10,10 +10,12 @@ import '../../routes.dart';
 class RoomGamePageArgs {
   final PartyLobbyData lobby;
   final String currentUserId;
+  final String? gameId;
 
   const RoomGamePageArgs({
     required this.lobby,
     required this.currentUserId,
+    this.gameId,
   });
 }
 
@@ -37,9 +39,11 @@ class _RoomGamePageState extends State<RoomGamePage> {
 
   int _capturedCount = 0;
   final List<String> _items = [];
+  final Map<String, GameItem> _visibleItems = {};
   late int _remainingSeconds;
   Timer? _gameTimer;
   String? _initErrorMessage;
+  StreamSubscription<List<GameItem>>? _itemsSub;
 
   GoogleMapController? _mapController;
   LatLng? _currentLatLng;
@@ -67,6 +71,54 @@ class _RoomGamePageState extends State<RoomGamePage> {
       _startCountdown();
       _loadCurrentLocation();
       _loadFieldPolygon();
+      // subscribe to game items for runners if gameId provided
+      final gameId = widget.args.gameId;
+      if (gameId != null && _role == PartyMemberRole.runner) {
+        _itemsSub = _partyService.watchGameItems(gameId).listen((items) {
+          // show one per type for requested types and place pins on map
+          const typesToShow = {'FAKE_LOCATION', 'FREEZE_TAGGER', 'SEE_TAGGER'};
+          final Map<String, GameItem> picked = {};
+          for (final it in items) {
+            if (typesToShow.contains(it.type) && it.state == 'AVAILABLE') {
+              // keep first seen per type
+              if (!picked.containsKey(it.type)) {
+                picked[it.type] = it;
+              }
+            }
+          }
+
+          if (mounted) {
+            setState(() {
+              _visibleItems
+                ..clear()
+                ..addAll(picked);
+
+              _items
+                ..clear()
+                ..addAll(picked.keys);
+
+              // update markers: remove existing item markers and add new ones
+              _markers.removeWhere((m) => m.markerId.value.startsWith('item_'));
+              for (final it in _visibleItems.values) {
+                final pos = LatLng(it.lat, it.lng);
+                // only show item pins if inside the field polygon
+                if (!_isPointInAnyField(pos)) continue;
+                final hue = it.type == 'FAKE_LOCATION'
+                    ? BitmapDescriptor.hueAzure
+                    : (it.type == 'SEE_TAGGER' ? BitmapDescriptor.hueGreen : BitmapDescriptor.hueViolet);
+                _markers.add(
+                  Marker(
+                    markerId: MarkerId('item_${it.itemId}'),
+                    position: pos,
+                    infoWindow: InfoWindow(title: it.type),
+                    icon: BitmapDescriptor.defaultMarkerWithHue(hue),
+                  ),
+                );
+              }
+            });
+          }
+        });
+      }
     }
   }
 
@@ -75,7 +127,30 @@ class _RoomGamePageState extends State<RoomGamePage> {
     _countdownTimer?.cancel();
     _gameTimer?.cancel();
     _mapController?.dispose();
+    _itemsSub?.cancel();
     super.dispose();
+  }
+
+  bool _isPointInAnyField(LatLng point) {
+    if (_fieldPolygons.isEmpty) return false;
+    for (final poly in _fieldPolygons) {
+      final pts = poly.points.toList();
+      if (_pointInPolygon(point, pts)) return true;
+    }
+    return false;
+  }
+
+  bool _pointInPolygon(LatLng point, List<LatLng> polygon) {
+    var inside = false;
+    for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      final xi = polygon[i].longitude, yi = polygon[i].latitude;
+      final xj = polygon[j].longitude, yj = polygon[j].latitude;
+
+      final intersect = ((yi > point.latitude) != (yj > point.latitude)) &&
+          (point.longitude < (xj - xi) * (point.latitude - yi) / (yj - yi + 0.0) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
   }
 
   PartyMemberRole _resolveRole() {
@@ -193,6 +268,26 @@ class _RoomGamePageState extends State<RoomGamePage> {
             strokeWidth: 2,
           ),
         };
+        // after loading the polygon, if we already have visible items, ensure markers
+        if (_visibleItems.isNotEmpty) {
+          _markers.removeWhere((m) => m.markerId.value.startsWith('item_'));
+          for (final it in _visibleItems.values) {
+            final pos = LatLng(it.lat, it.lng);
+            if (!_isPointInAnyField(pos)) continue;
+            _markers.add(
+              Marker(
+                markerId: MarkerId('item_${it.itemId}'),
+                position: pos,
+                infoWindow: InfoWindow(title: it.type),
+                icon: BitmapDescriptor.defaultMarkerWithHue(
+                  it.type == 'FAKE_LOCATION'
+                      ? BitmapDescriptor.hueAzure
+                      : BitmapDescriptor.hueViolet,
+                ),
+              ),
+            );
+          }
+        }
       });
     } catch (e, s) {
       debugPrint('Failed to load field polygon: $e\n$s');

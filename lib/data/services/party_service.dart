@@ -97,6 +97,42 @@ class PartyMemberData {
   }
 }
 
+class GameItem {
+  final String itemId;
+  final String type;
+  final String visibility;
+  final double lat;
+  final double lng;
+  final String state;
+  final String? pickedBy;
+  final Timestamp? spawnedAt;
+
+  GameItem({
+    required this.itemId,
+    required this.type,
+    required this.visibility,
+    required this.lat,
+    required this.lng,
+    required this.state,
+    this.pickedBy,
+    this.spawnedAt,
+  });
+
+  factory GameItem.fromDoc(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
+    final d = doc.data();
+    return GameItem(
+      itemId: d['itemId'] as String? ?? doc.id,
+      type: d['type'] as String? ?? 'UNKNOWN',
+      visibility: d['visibility'] as String? ?? 'RUNNER',
+      lat: (d['lat'] as num?)?.toDouble() ?? 0.0,
+      lng: (d['lng'] as num?)?.toDouble() ?? 0.0,
+      state: d['state'] as String? ?? 'AVAILABLE',
+      pickedBy: d['pickedBy'] as String?,
+      spawnedAt: d['spawnedAt'] as Timestamp?,
+    );
+  }
+}
+
 class PartyLobbyData {
   final String partyId;
   final String inviteCode;
@@ -497,5 +533,246 @@ class PartyService {
       }
     }
     return points;
+  }
+
+  /// Start a game session for the given party.
+  /// Creates a `gameSessions/{gameId}` document and populates
+  /// `gameSessions/{gameId}/items` based on the party's `itemSeed`.
+  /// This runs client-side (no Cloud Functions) and is intended
+  /// for local/emulator use or when server-side logic isn't required.
+  Future<String> startGame(String partyId, {int itemCount = 8}) async {
+    final partyRef = _parties.doc(partyId);
+    final partySnap = await partyRef.get();
+    if (!partySnap.exists) {
+      throw PartyJoinException('Party not found');
+    }
+
+    final partyData = partySnap.data() ?? <String, dynamic>{};
+    final itemSeed = partyData['itemSeed'] as String? ?? partyRef.id;
+    final durationMinutes = partyData['durationMinutes'] as int? ?? 15;
+    final area = partyData['area'] as Map<String, dynamic>? ?? {};
+
+    final gameRef = _firestore.collection('gameSessions').doc();
+
+    final now = DateTime.now().toUtc();
+    final freezeUntil = Timestamp.fromDate(now.add(const Duration(seconds: 30)));
+
+    final gameDoc = {
+      'gameId': gameRef.id,
+      'partyId': partyId,
+      'status': 'PREPARE',
+      'startAt': FieldValue.serverTimestamp(),
+      'endAt': null,
+      'freezeUntil': freezeUntil,
+      'durationMinutes': durationMinutes,
+      'area': area,
+      'gaugeThreshold': 100,
+      'listenDurationSeconds': 3,
+      'movementSampleWindow': 5,
+      'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+
+    final batch = _firestore.batch();
+    batch.set(gameRef, gameDoc);
+
+    // Generate deterministic items based on seed
+    final polygon = (area['polygon'] as List<dynamic>?)
+            ?.map((p) => LatLng((p['lat'] as num).toDouble(), (p['lng'] as num).toDouble()))
+            .toList() ??
+        [];
+
+    final rand = Random(_stableHash(itemSeed));
+
+    for (var i = 0; i < itemCount; i++) {
+      // sample a point inside polygon if possible, otherwise random bbox
+      LatLng pos;
+      if (polygon.isNotEmpty) {
+        pos = _samplePointInPolygon(polygon, rand);
+      } else {
+        pos = LatLng(35.0 + rand.nextDouble(), 135.0 + rand.nextDouble());
+      }
+
+      final itemRef = gameRef.collection('items').doc();
+      final types = ['SEE_TAGGER', 'FAKE_LOCATION', 'FREEZE_TAGGER', 'TRAP', 'FREEZE_ALL'];
+      final type = types[rand.nextInt(types.length)];
+      final visibility = rand.nextBool() ? 'TAGGER' : 'RUNNER';
+
+      batch.set(itemRef, {
+        'itemId': itemRef.id,
+        'type': type,
+        'visibility': visibility,
+        'lat': pos.latitude,
+        'lng': pos.longitude,
+        'spawnedAt': FieldValue.serverTimestamp(),
+        'pickedBy': null,
+        'state': 'AVAILABLE',
+      });
+    }
+
+    // Create players subcollection based on party members
+    final membersSnap = await partyRef.collection('members').get();
+    for (final m in membersSnap.docs) {
+      final mdata = m.data();
+      final playerRef = gameRef.collection('players').doc();
+      final roleCode = (mdata['role'] as String?) ?? 'PENDING';
+      batch.set(playerRef, {
+        'playerId': playerRef.id,
+        'userId': mdata['userId'] as String? ?? m.id,
+        'role': roleCode,
+        'status': 'ACTIVE',
+        'gauge': 0,
+        'cooldowns': <String, dynamic>{},
+        'items': <String, dynamic>{},
+        'lastLocation': null,
+        'lastUpdateAt': null,
+      });
+    }
+
+    // update party to reference game and mark in-progress
+    batch.update(partyRef, {
+      'gameId': gameRef.id,
+      'status': 'IN_PROGRESS',
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+
+    await batch.commit();
+
+    return gameRef.id;
+  }
+
+  /// Watch items for a game session.
+  Stream<List<GameItem>> watchGameItems(String gameId) {
+    final itemsRef = _firestore.collection('gameSessions').doc(gameId).collection('items');
+    return itemsRef.snapshots().map((snap) =>
+        snap.docs.map((d) => GameItem.fromDoc(d)).toList(growable: false));
+  }
+
+  /// Attempt to pick up an item for a player.
+  ///
+  /// This performs a transaction that:
+  /// - verifies the item exists and is `AVAILABLE`
+  /// - sets `state` -> `PICKED`, `pickedBy` -> `playerId`, `pickedAt` -> serverTimestamp
+  /// - updates the player's `items` map to include the picked item (by itemId)
+  /// - writes an `events` entry `ITEM_PICKED`
+  ///
+  /// Note: `playerId` must be the document id under `gameSessions/{gameId}/players/{playerId}`.
+  Future<bool> pickupItem({
+    required String gameId,
+    required String itemId,
+    required String playerId,
+  }) async {
+    final gameRef = _firestore.collection('gameSessions').doc(gameId);
+    final itemRef = gameRef.collection('items').doc(itemId);
+    final playerRef = gameRef.collection('players').doc(playerId);
+
+    try {
+      await _firestore.runTransaction((tx) async {
+        final itemSnap = await tx.get(itemRef);
+        if (!itemSnap.exists) {
+          throw Exception('item-not-found');
+        }
+        final itemData = itemSnap.data()!;
+        final state = itemData['state'] as String? ?? 'AVAILABLE';
+        if (state != 'AVAILABLE') {
+          throw Exception('item-not-available');
+        }
+
+        // mark item as picked
+        tx.update(itemRef, {
+          'state': 'PICKED',
+          'pickedBy': playerId,
+          'pickedAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+
+        // update player's items map (keyed by itemId)
+        final playerSnap = await tx.get(playerRef);
+        if (!playerSnap.exists) {
+          throw Exception('player-not-found');
+        }
+        final playerData = playerSnap.data()!;
+        final existing = Map<String, dynamic>.from(playerData['items'] as Map<String, dynamic>? ?? {});
+        final itemType = itemData['type'] as String? ?? 'UNKNOWN';
+        final prev = existing[itemId] as Map<String, dynamic>?;
+        final prevCount = prev != null ? (prev['count'] as int? ?? 0) : 0;
+        existing[itemId] = {
+          'type': itemType,
+          'count': prevCount + 1,
+          'pickedAt': FieldValue.serverTimestamp(),
+        };
+
+        tx.update(playerRef, {
+          'items': existing,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+
+        // write event
+        final eventsRef = gameRef.collection('events').doc();
+        tx.set(eventsRef, {
+          'eventId': eventsRef.id,
+          'type': 'ITEM_PICKED',
+          'payload': {
+            'itemId': itemId,
+            'playerId': playerId,
+            'itemType': itemType,
+          },
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      });
+      return true;
+    } catch (e) {
+      print('pickupItem failed: $e');
+      return false;
+    }
+  }
+
+  int _stableHash(String s) {
+    // FNV-1a 32-bit
+    var hash = 0x811c9dc5;
+    for (var i = 0; i < s.length; i++) {
+      hash ^= s.codeUnitAt(i);
+      hash = (hash * 0x01000193) & 0xffffffff;
+    }
+    return hash & 0x7fffffff;
+  }
+
+  LatLng _samplePointInPolygon(List<LatLng> poly, Random rand) {
+    // compute bbox
+    var minLat = poly.first.latitude;
+    var maxLat = poly.first.latitude;
+    var minLng = poly.first.longitude;
+    var maxLng = poly.first.longitude;
+    for (final p in poly) {
+      if (p.latitude < minLat) minLat = p.latitude;
+      if (p.latitude > maxLat) maxLat = p.latitude;
+      if (p.longitude < minLng) minLng = p.longitude;
+      if (p.longitude > maxLng) maxLng = p.longitude;
+    }
+
+    for (var tries = 0; tries < 50; tries++) {
+      final lat = minLat + rand.nextDouble() * (maxLat - minLat);
+      final lng = minLng + rand.nextDouble() * (maxLng - minLng);
+      if (_pointInPolygon(LatLng(lat, lng), poly)) {
+        return LatLng(lat, lng);
+      }
+    }
+
+    // fallback: return center
+    return LatLng((minLat + maxLat) / 2, (minLng + maxLng) / 2);
+  }
+
+  bool _pointInPolygon(LatLng point, List<LatLng> polygon) {
+    // ray-casting algorithm
+    var inside = false;
+    for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      final xi = polygon[i].latitude, yi = polygon[i].longitude;
+      final xj = polygon[j].latitude, yj = polygon[j].longitude;
+
+      final intersect = ((yi > point.longitude) != (yj > point.longitude)) &&
+          (point.latitude < (xj - xi) * (point.longitude - yi) / (yj - yi + 0.0) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
   }
 }
