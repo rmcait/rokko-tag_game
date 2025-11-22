@@ -720,7 +720,17 @@ class _RoomGamePageState extends State<RoomGamePage> {
       final maxSeconds = session.durationMinutes * 60;
       remaining = remaining.clamp(0, maxSeconds);
     }
-
+    if (_isHost) {
+    final status = session.status;
+    if (status != 'FINISHED' && (remaining <= 0 || _allRunnersCaught)) {
+      // タイムアップ or 全員確保 なのにまだ FINISHED でなければ更新する
+      _partyService.updateGameStatus(
+        gameId: widget.args.gameId,
+        status: 'FINISHED',
+        partyId: widget.args.lobby.partyId,
+      );
+    }
+  }
     // カウントダウン（鬼の待機時間）の計算
     var countdown = 0;
     var showGo = _showGo;
