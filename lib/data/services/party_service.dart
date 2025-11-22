@@ -512,14 +512,16 @@ class PartyService {
       'updatedAt': FieldValue.serverTimestamp(),
     });
 
-    // 2. 参加者を gameSessions/players にコピー
+    // 2. 参加者を gameSessions/players にコピー（ドキュメントID = userId に固定）
     for (final member in lobby.allMembers) {
-      final playerRef = gameRef.collection('players').doc();
+      final playerRef = gameRef.collection('players').doc(member.userId);
       batch.set(playerRef, {
         'playerId': playerRef.id,
         'userId': member.userId,
+        'displayName': member.name,
         'role': member.role.code,
         'status': 'ACTIVE',
+        'caught': false,
         'createdAt': FieldValue.serverTimestamp(),
       });
     }

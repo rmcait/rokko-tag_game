@@ -164,8 +164,8 @@ class _RoomGamePageState extends State<RoomGamePage> {
         'inside': true,
         'updatedAt': FieldValue.serverTimestamp(),
       },
-        SetOptions(merge: true),
-      );
+      SetOptions(merge: true),
+    );
 
       _checkFieldBoundary(current);
     });
@@ -383,6 +383,62 @@ class _RoomGamePageState extends State<RoomGamePage> {
         ..addAll(newMarkers);
     });
   }
+Future<void> _handleTagLogic({
+  required GeoPoint? myGeo,
+  required String? myRole,
+  required bool myCaught,
+  required QuerySnapshot<Map<String, dynamic>> snapshot,
+}) async {
+  if (myGeo == null || myRole == null) return;
+
+  // 逃走側が捕まったときの通知（1回だけ）
+  if (myRole == 'RUNNER' && myCaught && !_alreadyNotifiedCaught) {
+    _alreadyNotifiedCaught = true;
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('捕まってしまいました…！')),
+      );
+    }
+  }
+
+  // 鬼以外はここで終了
+  if (myRole != 'TAGGER') return;
+
+  const touchThresholdMeters = 8.0;
+
+  for (final doc in snapshot.docs) {
+    if (doc.id == widget.args.currentUserId) continue;
+
+    final data = doc.data();
+    final role = data['role'] as String?;
+    if (role != 'RUNNER') continue;
+    final gameData = data['gameData'] as Map<String, dynamic>?;
+      if (gameData == null) continue;
+
+      final caught = (gameData['caught'] as bool?) ?? false;
+      if (caught) continue;
+
+      final geo = gameData['lastLocation'] as GeoPoint?;
+      if (geo == null) continue;
+    
+
+    final distance = Geolocator.distanceBetween(
+      myGeo.latitude,
+      myGeo.longitude,
+      geo.latitude,
+      geo.longitude,
+    );
+
+    if (distance <= touchThresholdMeters) {
+      // ★ 捕まえた！
+      await doc.reference.update({
+        'caught': true,
+        'caughtAt': FieldValue.serverTimestamp(),
+        'caughtBy': widget.args.currentUserId,
+      });
+    }
+  }
+}
 // Future<void> _handleTagLogic({
 //   required GeoPoint? myGeo,
 //   required String? myRole,
