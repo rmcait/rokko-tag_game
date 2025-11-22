@@ -133,6 +133,42 @@ class GameItem {
   }
 }
 
+class GameTrap {
+  final String trapId;
+  final String placedBy;
+  final double lat;
+  final double lng;
+  final String state;
+  final String? triggeredBy;
+  final Timestamp? placedAt;
+  final Timestamp? triggeredAt;
+
+  GameTrap({
+    required this.trapId,
+    required this.placedBy,
+    required this.lat,
+    required this.lng,
+    required this.state,
+    this.triggeredBy,
+    this.placedAt,
+    this.triggeredAt,
+  });
+
+  factory GameTrap.fromDoc(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
+    final data = doc.data();
+    return GameTrap(
+      trapId: data['trapId'] as String? ?? doc.id,
+      placedBy: data['placedBy'] as String? ?? '',
+      lat: (data['lat'] as num?)?.toDouble() ?? 0.0,
+      lng: (data['lng'] as num?)?.toDouble() ?? 0.0,
+      state: data['state'] as String? ?? 'ACTIVE',
+      triggeredBy: data['triggeredBy'] as String?,
+      placedAt: data['placedAt'] as Timestamp?,
+      triggeredAt: data['triggeredAt'] as Timestamp?,
+    );
+  }
+}
+
 class PlayerItem {
   final String itemId;
   final String type;
@@ -705,6 +741,13 @@ class PartyService {
         snap.docs.map((d) => GameItem.fromDoc(d)).toList(growable: false));
   }
 
+  Stream<List<GameTrap>> watchTraps(String gameId) {
+    final trapsRef = _firestore.collection('gameSessions').doc(gameId).collection('traps');
+    return trapsRef.snapshots().map(
+          (snap) => snap.docs.map(GameTrap.fromDoc).toList(growable: false),
+        );
+  }
+
   Stream<List<PlayerItem>> watchPlayerItems(String gameId, String playerId) {
     final playerRef = _firestore.collection('gameSessions').doc(gameId).collection('players').doc(playerId);
     return playerRef.snapshots().map((snap) {
@@ -729,6 +772,11 @@ class PartyService {
       });
       return result;
     });
+  }
+
+  Stream<DocumentSnapshot<Map<String, dynamic>>> watchPlayerDoc(String gameId, String playerId) {
+    final playerRef = _firestore.collection('gameSessions').doc(gameId).collection('players').doc(playerId);
+    return playerRef.snapshots();
   }
 
   Future<List<PlayerLocation>> fetchTaggerLocations(String gameId) async {
@@ -1047,6 +1095,88 @@ class PartyService {
     }
   }
 
+  Future<bool> placeTrap({
+    required String gameId,
+    required String playerId,
+    required double lat,
+    required double lng,
+  }) async {
+    final gameRef = _firestore.collection('gameSessions').doc(gameId);
+    final trapRef = gameRef.collection('traps').doc();
+    try {
+      await trapRef.set({
+        'trapId': trapRef.id,
+        'placedBy': playerId,
+        'lat': lat,
+        'lng': lng,
+        'state': 'ACTIVE',
+        'placedAt': FieldValue.serverTimestamp(),
+        'triggeredBy': null,
+        'triggeredAt': null,
+      });
+
+      final eventsRef = gameRef.collection('events').doc();
+      await eventsRef.set({
+        'eventId': eventsRef.id,
+        'type': 'TRAP_PLACED',
+        'payload': {
+          'trapId': trapRef.id,
+          'playerId': playerId,
+          'lat': lat,
+          'lng': lng,
+        },
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      return true;
+    } catch (e) {
+      print('placeTrap failed: $e');
+      return false;
+    }
+  }
+
+  Future<bool> triggerTrap({
+    required String gameId,
+    required String trapId,
+    required String runnerPlayerId,
+  }) async {
+    final gameRef = _firestore.collection('gameSessions').doc(gameId);
+    final trapRef = gameRef.collection('traps').doc(trapId);
+    try {
+      await _firestore.runTransaction((tx) async {
+        final trapSnap = await tx.get(trapRef);
+        if (!trapSnap.exists) {
+          throw Exception('trap-not-found');
+        }
+        final trapData = trapSnap.data()!;
+        final state = trapData['state'] as String? ?? 'ACTIVE';
+        if (state != 'ACTIVE') {
+          throw Exception('trap-not-active');
+        }
+
+        tx.update(trapRef, {
+          'state': 'TRIGGERED',
+          'triggeredBy': runnerPlayerId,
+          'triggeredAt': FieldValue.serverTimestamp(),
+        });
+
+        final eventsRef = gameRef.collection('events').doc();
+        tx.set(eventsRef, {
+          'eventId': eventsRef.id,
+          'type': 'TRAP_TRIGGERED',
+          'payload': {
+            'trapId': trapId,
+            'runnerPlayerId': runnerPlayerId,
+          },
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      });
+      return true;
+    } catch (e) {
+      print('triggerTrap failed: $e');
+      return false;
+    }
+  }
+
   int _stableHash(String s) {
     // FNV-1a 32-bit
     var hash = 0x811c9dc5;
@@ -1055,45 +1185,6 @@ class PartyService {
       hash = (hash * 0x01000193) & 0xffffffff;
     }
     return hash & 0x7fffffff;
-  }
-
-  LatLng _samplePointInPolygon(List<LatLng> poly, Random rand) {
-    // compute bbox
-    var minLat = poly.first.latitude;
-    var maxLat = poly.first.latitude;
-    var minLng = poly.first.longitude;
-    var maxLng = poly.first.longitude;
-    for (final p in poly) {
-      if (p.latitude < minLat) minLat = p.latitude;
-      if (p.latitude > maxLat) maxLat = p.latitude;
-      if (p.longitude < minLng) minLng = p.longitude;
-      if (p.longitude > maxLng) maxLng = p.longitude;
-    }
-
-    for (var tries = 0; tries < 50; tries++) {
-      final lat = minLat + rand.nextDouble() * (maxLat - minLat);
-      final lng = minLng + rand.nextDouble() * (maxLng - minLng);
-      if (_pointInPolygon(LatLng(lat, lng), poly)) {
-        return LatLng(lat, lng);
-      }
-    }
-
-    // fallback: return center
-    return LatLng((minLat + maxLat) / 2, (minLng + maxLng) / 2);
-  }
-
-  bool _pointInPolygon(LatLng point, List<LatLng> polygon) {
-    // ray-casting algorithm
-    var inside = false;
-    for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-      final xi = polygon[i].latitude, yi = polygon[i].longitude;
-      final xj = polygon[j].latitude, yj = polygon[j].longitude;
-
-      final intersect = ((yi > point.longitude) != (yj > point.longitude)) &&
-          (point.latitude < (xj - xi) * (point.longitude - yi) / (yj - yi + 0.0) + xi);
-      if (intersect) inside = !inside;
-    }
-    return inside;
   }
 
   double _distanceMeters(
@@ -1264,4 +1355,40 @@ List<LatLng> _parsePolygonPoints(dynamic rawArea) {
     }
   }
   return const [];
+}
+
+LatLng _samplePointInPolygon(List<LatLng> poly, Random rand) {
+  var minLat = poly.first.latitude;
+  var maxLat = poly.first.latitude;
+  var minLng = poly.first.longitude;
+  var maxLng = poly.first.longitude;
+  for (final p in poly) {
+    if (p.latitude < minLat) minLat = p.latitude;
+    if (p.latitude > maxLat) maxLat = p.latitude;
+    if (p.longitude < minLng) minLng = p.longitude;
+    if (p.longitude > maxLng) maxLng = p.longitude;
+  }
+
+  for (var tries = 0; tries < 50; tries++) {
+    final lat = minLat + rand.nextDouble() * (maxLat - minLat);
+    final lng = minLng + rand.nextDouble() * (maxLng - minLng);
+    if (_pointInPolygon(LatLng(lat, lng), poly)) {
+      return LatLng(lat, lng);
+    }
+  }
+
+  return LatLng((minLat + maxLat) / 2, (minLng + maxLng) / 2);
+}
+
+bool _pointInPolygon(LatLng point, List<LatLng> polygon) {
+  var inside = false;
+  for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    final xi = polygon[i].latitude, yi = polygon[i].longitude;
+    final xj = polygon[j].latitude, yj = polygon[j].longitude;
+
+    final intersect = ((yi > point.longitude) != (yj > point.longitude)) &&
+        (point.latitude < (xj - xi) * (point.longitude - yi) / (yj - yi + 0.0) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
 }

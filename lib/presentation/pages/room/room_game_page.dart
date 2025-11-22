@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -46,15 +47,32 @@ class _RoomGamePageState extends State<RoomGamePage> {
   String? _initErrorMessage;
   StreamSubscription<List<GameItem>>? _itemsSub;
   StreamSubscription<List<PlayerItem>>? _playerItemsSub;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _playerDocSub;
   StreamSubscription<List<PlayerLocation>>? _taggerLocationsSub;
+  StreamSubscription<List<GameTrap>>? _trapsSub;
   String? _playerId;
   bool _isPickingItem = false;
   bool _isUsingSeeTagger = false;
   bool _isFreezingTagger = false;
   bool _isUsingTaggerAbility = false;
+  bool _isPlacingTrap = false;
   Timer? _taggerMarkerTimer;
   Timer? _runnerMarkerTimer;
-  StreamSubscription<Position>? _taggerPositionSub;
+  StreamSubscription<Position>? _positionSub;
+  final Map<String, GameTrap> _traps = {};
+  bool _isTrapped = false;
+  LatLng? _trapOrigin;
+  Timer? _trapReleaseTimer;
+  Timer? _trapCountdownTimer;
+  int _trapRemainingSeconds = 0;
+  bool _trapMovementDialogVisible = false;
+  bool _isFrozen = false;
+  LatLng? _freezeOrigin;
+  Timer? _freezeReleaseTimer;
+  Timer? _freezeCountdownTimer;
+  int _freezeRemainingSeconds = 0;
+  bool _freezeMovementDialogVisible = false;
+  bool _freezeDialogVisible = false;
 
   GoogleMapController? _mapController;
   LatLng? _currentLatLng;
@@ -92,6 +110,13 @@ class _RoomGamePageState extends State<RoomGamePage> {
         if (_role == PartyMemberRole.runner) {
           _subscribeToTaggerLocations(gameId);
         }
+        _subscribeToTraps(gameId);
+        if (_role != PartyMemberRole.pending) {
+          final playerId = _playerId;
+          if (playerId != null) {
+            _subscribeToPlayerDoc(gameId, playerId);
+          }
+        }
       }
     }
   }
@@ -103,10 +128,16 @@ class _RoomGamePageState extends State<RoomGamePage> {
     _mapController?.dispose();
     _itemsSub?.cancel();
     _playerItemsSub?.cancel();
+    _playerDocSub?.cancel();
     _taggerLocationsSub?.cancel();
+    _trapsSub?.cancel();
     _taggerMarkerTimer?.cancel();
     _runnerMarkerTimer?.cancel();
-    _taggerPositionSub?.cancel();
+    _positionSub?.cancel();
+    _trapReleaseTimer?.cancel();
+    _trapCountdownTimer?.cancel();
+    _freezeReleaseTimer?.cancel();
+    _freezeCountdownTimer?.cancel();
     super.dispose();
   }
 
@@ -210,7 +241,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
         _locationError = null;
         _updatePlayerMarker(latLng);
       });
-      _maybeStartTaggerTracking(latLng);
+      _startLiveLocationTracking(latLng);
 
       _mapController?.animateCamera(
         CameraUpdate.newLatLngZoom(latLng, 17),
@@ -290,6 +321,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
       });
       if (playerId != null) {
         _subscribeToPlayerItems(gameId, playerId);
+        _subscribeToPlayerDoc(gameId, playerId);
       }
     } catch (e, s) {
       debugPrint('Failed to fetch playerId: $e\n$s');
@@ -320,12 +352,37 @@ class _RoomGamePageState extends State<RoomGamePage> {
     });
   }
 
+  void _subscribeToPlayerDoc(String gameId, String playerId) {
+    _playerDocSub?.cancel();
+    _playerDocSub = _partyService.watchPlayerDoc(gameId, playerId).listen((snap) {
+      final data = snap.data();
+      if (!mounted || data == null) return;
+      if (_role == PartyMemberRole.tagger) {
+        final cooldowns = data['cooldowns'] as Map<String, dynamic>?;
+        _handleFreezeCooldown(cooldowns);
+      }
+    });
+  }
+
   void _subscribeToTaggerLocations(String gameId) {
     _taggerLocationsSub?.cancel();
     _taggerLocationsSub = _partyService.watchTaggerLocations(gameId).listen((locations) {
       if (!mounted) return;
       setState(() {
         _taggerLocations = locations;
+      });
+    });
+  }
+
+  void _subscribeToTraps(String gameId) {
+    _trapsSub?.cancel();
+    _trapsSub = _partyService.watchTraps(gameId).listen((traps) {
+      if (!mounted) return;
+      setState(() {
+        _traps
+          ..clear()
+          ..addEntries(traps.map((t) => MapEntry(t.trapId, t)));
+        _refreshTrapMarkers();
       });
     });
   }
@@ -347,6 +404,23 @@ class _RoomGamePageState extends State<RoomGamePage> {
     }
   }
 
+  void _refreshTrapMarkers() {
+    _markers.removeWhere((m) => m.markerId.value.startsWith('trap_'));
+    if (_role != PartyMemberRole.tagger) return;
+    for (final trap in _traps.values) {
+      if (trap.state != 'ACTIVE') continue;
+      final pos = LatLng(trap.lat, trap.lng);
+      _markers.add(
+        Marker(
+          markerId: MarkerId('trap_${trap.trapId}'),
+          position: pos,
+          infoWindow: const InfoWindow(title: '罠'),
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRose),
+        ),
+      );
+    }
+  }
+
   void _handleItemChipTap(PlayerItem item) {
     if (_isUsingSeeTagger) return;
     if (_isFreezingTagger) return;
@@ -359,6 +433,17 @@ class _RoomGamePageState extends State<RoomGamePage> {
         break;
       case 'FREEZE_TAGGER':
         _useFreezeTagger(item);
+        break;
+      default:
+        _showSnack('このアイテムの使用はまだできません');
+    }
+  }
+
+  void _handleTaggerItemChipTap(PlayerItem item) {
+    if (_isPlacingTrap) return;
+    switch (item.type) {
+      case 'TRAP':
+        _useTrap(item);
         break;
       default:
         _showSnack('このアイテムの使用はまだできません');
@@ -445,6 +530,10 @@ class _RoomGamePageState extends State<RoomGamePage> {
       _showSnack('現在位置を取得できていません');
       return;
     }
+    if (!_isPointInAnyField(current)) {
+      _showSnack('フィールド内でのみ設置できます');
+      return;
+    }
     final target = _findNearestTaggerWithinMeters(current, 5);
     if (target == null) {
       _showSnack('半径5m以内に鬼がいません');
@@ -485,6 +574,57 @@ class _RoomGamePageState extends State<RoomGamePage> {
     }
   }
 
+  Future<void> _useTrap(PlayerItem item) async {
+    if (_isPlacingTrap) return;
+    final gameId = widget.args.gameId;
+    if (gameId == null) {
+      _showSnack('ゲーム情報が見つかりません');
+      return;
+    }
+    final playerId = await _ensurePlayerId();
+    if (playerId == null) return;
+    final current = _currentLatLng;
+    if (current == null) {
+      _showSnack('現在位置を取得できていません');
+      return;
+    }
+    setState(() => _isPlacingTrap = true);
+    try {
+      final placed = await _partyService.placeTrap(
+        gameId: gameId,
+        playerId: playerId,
+        lat: current.latitude,
+        lng: current.longitude,
+      );
+      if (!mounted) return;
+      if (!placed) {
+        _showSnack('トラップの設置に失敗しました');
+        return;
+      }
+      final consumed = await _partyService.consumePlayerItem(
+        gameId: gameId,
+        playerId: playerId,
+        itemId: item.itemId,
+      );
+      if (!consumed) {
+        _showSnack('アイテムの消費に失敗しました');
+      } else {
+        _showSnack('トラップを設置しました');
+      }
+    } catch (e, s) {
+      debugPrint('Failed to place trap: $e\n$s');
+      if (mounted) {
+        _showSnack('トラップの設置に失敗しました');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isPlacingTrap = false);
+      } else {
+        _isPlacingTrap = false;
+      }
+    }
+  }
+
   PlayerLocation? _findNearestTaggerWithinMeters(LatLng origin, double radiusMeters) {
     PlayerLocation? closest;
     var minDistance = double.infinity;
@@ -505,6 +645,254 @@ class _RoomGamePageState extends State<RoomGamePage> {
     return closest;
   }
 
+  void _checkTrapCollision(LatLng latLng) {
+    if (_isTrapped) return;
+    GameTrap? hitTrap;
+    for (final trap in _traps.values) {
+      if (trap.state != 'ACTIVE') continue;
+      final dist = Geolocator.distanceBetween(
+        latLng.latitude,
+        latLng.longitude,
+        trap.lat,
+        trap.lng,
+      );
+      if (dist <= 5) {
+        hitTrap = trap;
+        break;
+      }
+    }
+    if (hitTrap != null) {
+      unawaited(_onTrapTriggered(hitTrap, latLng));
+    }
+  }
+
+  void _enforceTrapRestriction(LatLng latLng) {
+    if (!_isTrapped || _trapOrigin == null) return;
+    final dist = Geolocator.distanceBetween(
+      _trapOrigin!.latitude,
+      _trapOrigin!.longitude,
+      latLng.latitude,
+      latLng.longitude,
+    );
+    if (dist > 5 && !_trapMovementDialogVisible) {
+      _showTrapMovementWarning();
+    }
+  }
+
+  Future<void> _onTrapTriggered(GameTrap trap, LatLng latLng) async {
+    final gameId = widget.args.gameId;
+    final playerId = await _ensurePlayerId();
+    if (gameId == null || playerId == null) return;
+    final success = await _partyService.triggerTrap(
+      gameId: gameId,
+      trapId: trap.trapId,
+      runnerPlayerId: playerId,
+    );
+    if (!success || !mounted) return;
+    setState(() {
+      _isTrapped = true;
+      _trapOrigin = latLng;
+      _trapRemainingSeconds = 5;
+    });
+    _trapCountdownTimer?.cancel();
+    _trapCountdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() {
+        _trapRemainingSeconds = (_trapRemainingSeconds - 1).clamp(0, 5);
+      });
+      if (_trapRemainingSeconds <= 0) {
+        timer.cancel();
+      }
+    });
+    _trapReleaseTimer?.cancel();
+    _trapReleaseTimer = Timer(const Duration(seconds: 5), () {
+      if (!mounted) return;
+      setState(() {
+        _isTrapped = false;
+        _trapOrigin = null;
+        _trapRemainingSeconds = 0;
+      });
+      _trapMovementDialogVisible = false;
+    });
+    _showTrapCaptureDialog();
+  }
+
+  Future<void> _showTrapCaptureDialog() async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('トラップ発動'),
+        content: const Text('トラップにかかりました。5秒間その場で待機してください。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showTrapMovementWarning() async {
+    if (!mounted || _trapMovementDialogVisible) return;
+    _trapMovementDialogVisible = true;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('動けません'),
+        content: const Text('まだ自由に動けません。指定範囲内で待機してください。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+    if (mounted) {
+      setState(() {
+        _trapMovementDialogVisible = false;
+      });
+    } else {
+      _trapMovementDialogVisible = false;
+    }
+  }
+
+  void _handleFreezeCooldown(Map<String, dynamic>? cooldowns) {
+    final raw = cooldowns?['freezeTaggerUntil'];
+    Timestamp? freezeUntil;
+    if (raw is Timestamp) {
+      freezeUntil = raw;
+    }
+    if (freezeUntil == null) {
+      _stopFreezeState();
+      return;
+    }
+    final remaining = freezeUntil.toDate().difference(DateTime.now()).inSeconds;
+    if (remaining > 0) {
+      _startFreezeState(remaining);
+    } else {
+      _stopFreezeState();
+    }
+  }
+
+  void _startFreezeState(int remainingSeconds) {
+    final seconds = remainingSeconds.clamp(1, 30);
+    _freezeCountdownTimer?.cancel();
+    _freezeReleaseTimer?.cancel();
+    setState(() {
+      _isFrozen = true;
+      _freezeOrigin ??= _currentLatLng;
+      _freezeRemainingSeconds = seconds;
+    });
+    _freezeCountdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() {
+        _freezeRemainingSeconds = (_freezeRemainingSeconds - 1).clamp(0, 30);
+      });
+      if (_freezeRemainingSeconds <= 0) {
+        timer.cancel();
+      }
+    });
+    _freezeReleaseTimer = Timer(Duration(seconds: seconds), () {
+      _stopFreezeState();
+    });
+    if (!_freezeDialogVisible) {
+      _freezeDialogVisible = true;
+      unawaited(_showFreezeDialog());
+    }
+  }
+
+  void _stopFreezeState() {
+    if (!_isFrozen) return;
+    _freezeCountdownTimer?.cancel();
+    _freezeReleaseTimer?.cancel();
+    if (mounted) {
+      setState(() {
+        _isFrozen = false;
+        _freezeOrigin = null;
+        _freezeRemainingSeconds = 0;
+      });
+    } else {
+      _isFrozen = false;
+      _freezeOrigin = null;
+      _freezeRemainingSeconds = 0;
+    }
+    _freezeMovementDialogVisible = false;
+    _freezeDialogVisible = false;
+  }
+
+  void _enforceFreezeRestriction(LatLng latLng) {
+    if (!_isFrozen || _freezeOrigin == null) return;
+    final dist = Geolocator.distanceBetween(
+      _freezeOrigin!.latitude,
+      _freezeOrigin!.longitude,
+      latLng.latitude,
+      latLng.longitude,
+    );
+    if (dist > 5 && !_freezeMovementDialogVisible) {
+      _freezeMovementDialogVisible = true;
+      unawaited(_showFreezeMovementWarning());
+    }
+  }
+
+  Future<void> _showFreezeDialog() async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('凍結中'),
+        content: const Text('鬼は5秒間動けません。範囲内で待機してください。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+    if (mounted) {
+      setState(() {
+        _freezeDialogVisible = false;
+      });
+    } else {
+      _freezeDialogVisible = false;
+    }
+  }
+
+  Future<void> _showFreezeMovementWarning() async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('まだ動けません'),
+        content: const Text('凍結が解除されるまで指定範囲内で待機してください。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+    if (mounted) {
+      setState(() {
+        _freezeMovementDialogVisible = false;
+      });
+    } else {
+      _freezeMovementDialogVisible = false;
+    }
+  }
+
   bool _isItemUsable(PlayerItem item) {
     if (item.type != 'FREEZE_TAGGER') {
       return true;
@@ -513,6 +901,13 @@ class _RoomGamePageState extends State<RoomGamePage> {
     if (current == null) return false;
     final target = _findNearestTaggerWithinMeters(current, 5);
     return target != null;
+  }
+
+  bool _isTaggerItemUsable(PlayerItem item) {
+    if (item.type == 'TRAP') {
+      return _currentLatLng != null && !_isPlacingTrap && !_isFrozen;
+    }
+    return true;
   }
 
   double _itemHue(String type) {
@@ -594,6 +989,19 @@ class _RoomGamePageState extends State<RoomGamePage> {
     final remainingPlayers =
         (totalPlayers - _capturedCount).clamp(0, totalPlayers).toInt();
 
+    final statsWidget = _StatsBar(
+      accent: _palette.accent,
+      capturedCount: _capturedCount,
+      remainingPlayers: remainingPlayers,
+      items: _playerItems,
+      onItemTap: _role == PartyMemberRole.runner
+          ? _handleItemChipTap
+          : (_role == PartyMemberRole.tagger ? _handleTaggerItemChipTap : null),
+      onItemEnabled: _role == PartyMemberRole.runner
+          ? _isItemUsable
+          : (_role == PartyMemberRole.tagger ? _isTaggerItemUsable : null),
+    );
+
     return Scaffold(
       backgroundColor: Colors.grey.shade100,
       appBar: AppBar(
@@ -660,6 +1068,28 @@ class _RoomGamePageState extends State<RoomGamePage> {
                       accent: _palette.accent,
                     ),
                     const Spacer(),
+                    if (_role == PartyMemberRole.runner && _isTrapped)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: _StatusOverlay(
+                          accent: _palette.accent,
+                          icon: Icons.warning_amber_rounded,
+                          title: 'トラップ発動中',
+                          message: 'あと ${_trapRemainingSeconds}s 待機してください',
+                        ),
+                      ),
+                    if (_role == PartyMemberRole.tagger && _isFrozen)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: _StatusOverlay(
+                          accent: _palette.accent,
+                          icon: Icons.ac_unit,
+                          title: '凍結中',
+                          message: _freezeRemainingSeconds > 0
+                              ? 'あと ${_freezeRemainingSeconds}s 待機してください'
+                              : '解除されるまで待機してください',
+                        ),
+                      ),
                     if (_role == PartyMemberRole.tagger) ...[
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -671,16 +1101,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
                             onActivate: _activateTaggerAbility,
                           ),
                           const SizedBox(width: 12),
-                          Expanded(
-                            child: _StatsBar(
-                              accent: _palette.accent,
-                              capturedCount: _capturedCount,
-                              remainingPlayers: remainingPlayers,
-                              items: const [],
-                              onItemTap: null,
-                              onItemEnabled: null,
-                            ),
-                          ),
+                          Expanded(child: statsWidget),
                         ],
                       ),
                       const SizedBox(height: 12),
@@ -693,14 +1114,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
                         },
                       ),
                     ] else
-                      _StatsBar(
-                        accent: _palette.accent,
-                        capturedCount: _capturedCount,
-                        remainingPlayers: remainingPlayers,
-                        items: _playerItems,
-                        onItemTap: _handleItemChipTap,
-                        onItemEnabled: _isItemUsable,
-                      ),
+                      statsWidget,
                   ],
                 ),
               ),
@@ -711,18 +1125,36 @@ class _RoomGamePageState extends State<RoomGamePage> {
     );
   }
 
-  void _maybeStartTaggerTracking(LatLng initial) {
-    if (_role != PartyMemberRole.tagger) return;
-    _lastGaugeLatLng ??= initial;
-    _taggerPositionSub ??= Geolocator.getPositionStream(
+  void _startLiveLocationTracking(LatLng initial) {
+    if (_positionSub != null) return;
+    if (_role == PartyMemberRole.tagger) {
+      _lastGaugeLatLng ??= initial;
+    }
+    _positionSub = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.best,
         distanceFilter: 2,
       ),
     ).listen((position) {
-      final latLng = LatLng(position.latitude, position.longitude);
-      _handleTaggerMovement(latLng);
+      _handlePositionUpdate(position);
     });
+  }
+
+  void _handlePositionUpdate(Position position) {
+    final latLng = LatLng(position.latitude, position.longitude);
+    if (_role == PartyMemberRole.tagger) {
+      _handleTaggerMovement(latLng);
+      _enforceFreezeRestriction(latLng);
+    } else {
+      setState(() {
+        _currentLatLng = latLng;
+        _updatePlayerMarker(latLng);
+      });
+    }
+    if (_role == PartyMemberRole.runner) {
+      _checkTrapCollision(latLng);
+      _enforceTrapRestriction(latLng);
+    }
   }
 
   void _handleTaggerMovement(LatLng latLng) {
@@ -755,6 +1187,10 @@ class _RoomGamePageState extends State<RoomGamePage> {
   void _activateTaggerAbility() {
     if (_gaugePercent < 100) {
       _showSnack('ゲージが満タンになるまで歩いてください');
+      return;
+    }
+    if (_isFrozen) {
+      _showSnack('凍結中は使用できません');
       return;
     }
     if (_isUsingTaggerAbility) return;
@@ -1264,6 +1700,57 @@ class _AbilityGaugeButton extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _StatusOverlay extends StatelessWidget {
+  final String title;
+  final String message;
+  final IconData icon;
+  final Color accent;
+
+  const _StatusOverlay({
+    required this.title,
+    required this.message,
+    required this.icon,
+    required this.accent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.7),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: accent, width: 2),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, color: Colors.white),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    color: accent,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                Text(
+                  message,
+                  style: const TextStyle(color: Colors.white),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
