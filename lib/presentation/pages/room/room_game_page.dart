@@ -1,12 +1,13 @@
 import 'dart:async';
-
+import 'package:vibration/vibration.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../../data/services/party_service.dart';
 import '../../routes.dart';
-
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:ntp/ntp.dart'; // ★追加
 import 'package:turf/turf.dart' as turf;
@@ -96,6 +97,8 @@ class _RoomGamePageState extends State<RoomGamePage> {
     super.initState();
     _latestLobby = widget.args.lobby;
     _initializeAsync();
+    _setupNotifications();
+    
     try {
       _role = _resolveRole();
     } catch (e, s) {
@@ -121,6 +124,54 @@ class _RoomGamePageState extends State<RoomGamePage> {
     _startLocationWatch(); // ★ 追加：継続的な位置送信
     _startPlayersWatch();
     _refreshLobbyRole();
+  }
+  // ★追加: 通知セットアップメソッド
+  Future<void> _setupNotifications() async {
+    final messaging = FirebaseMessaging.instance;
+    
+    // 1. 通知権限のリクエスト
+    await messaging.requestPermission();
+
+    // 2. ゲームIDのトピックを購読
+    final gameId = widget.args.lobby.gameId;
+    if (gameId != null) {
+      await messaging.subscribeToTopic('game_$gameId');
+    }
+
+    // 3. アプリ起動中の通知受信リスナー
+    FirebaseMessaging.onMessage.listen((RemoteMessage message) async{
+      if (message.notification != null) {
+        if (await Vibration.hasVibrator() ?? false) {
+          Vibration.vibrate(duration: 1000); // 1000ミリ秒（1秒）振動
+        }
+        // スナックバーで表示
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${message.notification!.title}: ${message.notification!.body}'),
+              backgroundColor: Colors.blueAccent,
+              duration: const Duration(seconds: 3),
+            ),
+          );
+        }
+      }
+    });
+  }
+
+  // ★追加: Cloud Functions を呼ぶヘルパーメソッド
+  Future<void> _sendNotification(String title, String body) async {
+    final gameId = widget.args.lobby.gameId;
+    if (gameId == null) return;
+
+    try {
+      await FirebaseFunctions.instance.httpsCallable('notifyGameEvent').call({
+        'gameId': gameId,
+        'title': title,
+        'body': body,
+      });
+    } catch (e) {
+      debugPrint('Failed to send notification: $e');
+    }
   }
   // ★追加: NTP同期メソッド
   Future<void> _syncTime() async {
@@ -348,16 +399,19 @@ class _RoomGamePageState extends State<RoomGamePage> {
       }
       return;
     }
-
+  // ★修正: リストをコピーして、別のリストとして固定する
+    // これで裏で _nearRunnerRefs が変わってもクラッシュしなくなります
+    final targets = List<DocumentReference<Map<String, dynamic>>>.from(_nearRunnerRefs);
     // 近くにいる RUNNER 全員を捕まえたことにする
-    for (final ref in _nearRunnerRefs) {
+    for (final ref in targets) {
       await ref.update({
         'caught': true,
         'caughtAt': FieldValue.serverTimestamp(),
         'caughtBy': widget.args.currentUserId,
       });
     }
-
+    final myName = _players.firstWhere((p) => p.isMe).name;
+    await _sendNotification('確保！', '$myName が逃走者を捕まえました！');
     if (mounted) {
       setState(() {
         _canCatch = false;
@@ -481,7 +535,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
     return bubbles;
   }
 
-  void _checkFieldBoundary(LatLng point) {
+  void _checkFieldBoundary(LatLng point) async {
     if (_fieldPoints.length < 3) return;
 
     final ring = _fieldPoints
@@ -500,9 +554,19 @@ class _RoomGamePageState extends State<RoomGamePage> {
 
     if (!inside && !_outsideNotified) {
       _outsideNotified = true;
+      if (await Vibration.hasVibrator() ?? false) {
+        // パターン振動も可能 (待機500ms, 振動1000ms, 待機500ms, 振動1000ms...)
+        Vibration.vibrate(pattern: [500, 1000, 500, 1000]); 
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('現在地はエリア外です')),
       );
+      final myName = _players.firstWhere(
+        (p) => p.isMe, 
+        orElse: () => _PlayerInfo(id: '', name: '誰か', position: LatLng(0,0), role: '', isMe: true, inside: false, caught: false)
+      ).name;
+      
+      _sendNotification('エリア外警告', '$myName さんがエリア外に出ました！');
     } else if (inside) {
       // エリア内に戻ったら通知状態をリセット
       _outsideNotified = false;
@@ -518,7 +582,10 @@ class _RoomGamePageState extends State<RoomGamePage> {
 
     _posSub?.cancel();
     _playersSub?.cancel();
-
+    final gameId = widget.args.lobby.gameId;
+    if (gameId != null) {
+      FirebaseMessaging.instance.unsubscribeFromTopic('game_$gameId');
+    }
     super.dispose();
   }
 

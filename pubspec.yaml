@@ -42,6 +42,10 @@ dependencies:
   google_maps_flutter: ^2.6.1
   geolocator: ^10.1.0
   turf: ^0.0.10
+  cloud_functions: ^6.0.4
+
+  firebase_messaging: ^16.0.4
+  vibration: ^3.1.4
 
 dev_dependencies:
   flutter_test:
