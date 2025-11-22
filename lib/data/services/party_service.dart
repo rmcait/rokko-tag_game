@@ -499,10 +499,17 @@ class PartyService {
       partyData?['area']?['polygon'] as List<dynamic>?,
     );
     final seed = (partyData?['itemSeed'] as String?) ?? lobby.partyId;
-    final initialItems = _generateInitialItemsForGame(
+    final runnerItems = _generateInitialItemsForGame(
       polygon: polygon,
-      seed: seed,
+      seed: '$seed-runner',
+      types: _runnerItemTypes,
     );
+    final taggerItems = _generateInitialItemsForGame(
+      polygon: polygon,
+      seed: '$seed-tagger',
+      types: _taggerItemTypes,
+    );
+    final initialItems = [...runnerItems, ...taggerItems];
 
     final batch = _firestore.batch();
 
@@ -692,13 +699,14 @@ class PartyService {
   List<_GeneratedItem> _generateInitialItemsForGame({
     required List<LatLng> polygon,
     required String seed,
+    required List<String> types,
   }) {
     final fieldPolygon = polygon.isNotEmpty ? polygon : _defaultFieldPolygon();
     final bounds = _PolygonBounds.fromPolygon(fieldPolygon);
     final random = Random(seed.hashCode);
 
     final items = <_GeneratedItem>[];
-    for (final type in _initialItemTypes) {
+    for (final type in types) {
       final point = _randomPointInsidePolygon(
         random: random,
         bounds: bounds,
@@ -790,10 +798,15 @@ class PartyService {
 
 const _defaultItemVisibility = 'RUNNER';
 
-const List<String> _initialItemTypes = [
+const List<String> _runnerItemTypes = [
   'SEE_TAGGER',
   'FAKE_LOCATION',
   'FREEZE_TAGGER',
+];
+
+const List<String> _taggerItemTypes = [
+  'TRAP',
+  'FAKE_LOCATION_TAGGER',
 ];
 
 const Map<String, String> _itemVisibilityByType = {
@@ -802,6 +815,7 @@ const Map<String, String> _itemVisibilityByType = {
   'FREEZE_TAGGER': 'RUNNER',
   'TRAP': 'TAGGER',
   'FREEZE_ALL': 'TAGGER',
+  'FAKE_LOCATION_TAGGER': 'TAGGER',
 };
 
 class _GeneratedItem {

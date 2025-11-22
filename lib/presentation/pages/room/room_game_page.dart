@@ -85,11 +85,33 @@ class _GameItem {
   }
 }
 
-const Set<String> _mapItemTypes = {
+const Set<String> _runnerVisibleItemTypes = {
   'FREEZE_TAGGER',
   'SEE_TAGGER',
   'FAKE_LOCATION',
 };
+
+const Set<String> _taggerVisibleItemTypes = {
+  'TRAP',
+  'FAKE_LOCATION_TAGGER',
+};
+
+class _ItemStates {
+  static const available = 'AVAILABLE';
+  static const picked = 'PICKED';
+  static const armed = 'ARMED';
+  static const used = 'USED';
+}
+
+Set<String> _visibleItemTypesForRole(PartyMemberRole role) {
+  switch (role) {
+    case PartyMemberRole.tagger:
+      return _taggerVisibleItemTypes;
+    case PartyMemberRole.runner:
+    case PartyMemberRole.pending:
+      return _runnerVisibleItemTypes;
+  }
+}
 class _RoomGamePageState extends State<RoomGamePage> {
   final PartyService _partyService = PartyService();
 
@@ -106,6 +128,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
 
   final List<_PlayerInfo> _players = [];
   final List<_GameItem> _gameItems = [];
+  final List<_GameItem> _armedTraps = [];
   bool _isPickingItem = false;
   bool _isUsingItem = false;
   bool _freezeReady = false;
@@ -141,8 +164,8 @@ class _RoomGamePageState extends State<RoomGamePage> {
   Timer? _revealTimer;
   GeoPoint? _lastTaggerGeo;
   String? _currentTaggerId;
-  GeoPoint? _taggerFreezeOrigin;
-  DateTime? _taggerFreezeUntil;
+  GeoPoint? _freezeOrigin;
+  DateTime? _freezeUntil;
   bool _freezePopupShown = false;
   Set<Polygon> _fieldPolygons = {};
   List<_PlayerInfo> get _otherPlayers =>
@@ -155,7 +178,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
   int _ntpOffset = 0;
 
   bool get _isCurrentlyFrozen {
-    final until = _taggerFreezeUntil;
+    final until = _freezeUntil;
     if (until == null) return false;
     return _now.isBefore(until);
   }
@@ -319,10 +342,10 @@ class _RoomGamePageState extends State<RoomGamePage> {
     final current = LatLng(pos.latitude, pos.longitude);
 
     final effectiveRole = _effectiveRole(_myRoleCode);
-    if (effectiveRole == 'TAGGER' && _isCurrentlyFrozen && _taggerFreezeOrigin != null) {
+    if (_isCurrentlyFrozen && _freezeOrigin != null) {
       final freezeDistance = Geolocator.distanceBetween(
-        _taggerFreezeOrigin!.latitude,
-        _taggerFreezeOrigin!.longitude,
+        _freezeOrigin!.latitude,
+        _freezeOrigin!.longitude,
         current.latitude,
         current.longitude,
       );
@@ -343,6 +366,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
         _currentLatLng = current;
       });
       _updateTaggerGauge(current);
+      _checkTrapCollision(current, effectiveRole);
 
     // Firestore に自分の位置を書き込む
     final gameId = widget.args.lobby.gameId;
@@ -411,17 +435,11 @@ class _RoomGamePageState extends State<RoomGamePage> {
           myCaught = caught;
           final rawItems = (data['items'] as List<dynamic>?) ?? const [];
           myItemsList = rawItems.cast<String>();
-          if (role == 'TAGGER') {
-            final freezeUntil = (data['freezeUntil'] as Timestamp?)?.toDate();
-            final freezeOrigin = data['freezeOrigin'] as GeoPoint?;
-            _taggerFreezeUntil = freezeUntil;
-            _taggerFreezeOrigin = freezeOrigin;
-            if (!_isCurrentlyFrozen) {
-              _freezePopupShown = false;
-            }
-          } else {
-            _taggerFreezeUntil = null;
-            _taggerFreezeOrigin = null;
+          final freezeUntil = (data['freezeUntil'] as Timestamp?)?.toDate();
+          final freezeOrigin = data['freezeOrigin'] as GeoPoint?;
+          _freezeUntil = freezeUntil;
+          _freezeOrigin = freezeOrigin;
+          if (!_isCurrentlyFrozen) {
             _freezePopupShown = false;
           }
         }
@@ -535,19 +553,27 @@ class _RoomGamePageState extends State<RoomGamePage> {
         .snapshots()
         .listen(
       (snapshot) {
-        final items = snapshot.docs
-            .map(_GameItem.fromDoc)
-            .where((item) => _mapItemTypes.contains(item.type))
-            .toList();
+        final allowedTypes = _visibleItemTypesForRole(_role);
+        final allItems = snapshot.docs.map(_GameItem.fromDoc).toList();
+        final items =
+            allItems.where((item) => allowedTypes.contains(item.type)).toList();
         if (!mounted) return;
         final markers = _buildItemMarkers(items);
         setState(() {
           _gameItems
             ..clear()
-            ..addAll(items);
+            ..addAll(allItems);
           _itemMarkers
             ..clear()
             ..addAll(markers);
+          _armedTraps
+            ..clear()
+            ..addAll(
+              allItems.where(
+                (item) =>
+                    item.type == 'TRAP' && item.state == _ItemStates.armed,
+              ),
+            );
           _refreshCombinedMarkers();
         });
       },
@@ -559,9 +585,10 @@ class _RoomGamePageState extends State<RoomGamePage> {
 
   Set<Marker> _buildItemMarkers(List<_GameItem> items) {
     final markers = <Marker>{};
-    for (final item in items.where(
-      (element) => element.state == 'AVAILABLE',
-    )) {
+    for (final item in items) {
+      final shouldShow = item.state == _ItemStates.available ||
+          (item.type == 'TRAP' && item.state == _ItemStates.armed);
+      if (!shouldShow) continue;
       final hue = _itemHueByType(item.type);
       markers.add(
         Marker(
@@ -586,6 +613,10 @@ class _RoomGamePageState extends State<RoomGamePage> {
         return BitmapDescriptor.hueGreen;
       case 'FAKE_LOCATION':
         return BitmapDescriptor.hueCyan;
+      case 'TRAP':
+        return BitmapDescriptor.hueRed;
+      case 'FAKE_LOCATION_TAGGER':
+        return BitmapDescriptor.hueMagenta;
       default:
         return BitmapDescriptor.hueRose;
     }
@@ -599,22 +630,34 @@ class _RoomGamePageState extends State<RoomGamePage> {
         return '鬼を探知';
       case 'FAKE_LOCATION':
         return 'フェイク位置';
+      case 'TRAP':
+        return 'トラップ';
+      case 'FAKE_LOCATION_TAGGER':
+        return 'フェイク位置(鬼)';
       default:
         return type;
     }
   }
   
   bool _isItemEnabled(String type) {
-    if (_role != PartyMemberRole.runner || _iAmCaught) {
+    if (_iAmCaught) {
       return false;
     }
-    if (type == 'FREEZE_TAGGER') {
-      return _freezeReady;
+    if (_role == PartyMemberRole.runner) {
+      if (type == 'FREEZE_TAGGER') {
+        return _freezeReady;
+      }
+      if (type == 'FAKE_LOCATION') {
+        return false;
+      }
+      return type != 'TRAP';
+    } else if (_role == PartyMemberRole.tagger) {
+      if (type == 'TRAP') {
+        return true;
+      }
+      return type != 'FAKE_LOCATION';
     }
-    if (type == 'FAKE_LOCATION') {
-      return false;
-    }
-    return true;
+    return false;
   }
 
   Future<void> _tryPickupNearbyItems(LatLng current) async {
@@ -623,10 +666,14 @@ class _RoomGamePageState extends State<RoomGamePage> {
     if (_items.length >= 2) return;
     if (role == 'PENDING') return;
 
+    final allowedTypes = role == 'TAGGER'
+        ? _taggerVisibleItemTypes
+        : _runnerVisibleItemTypes;
+
     final nearby = _gameItems.where(
       (item) =>
           item.state == 'AVAILABLE' &&
-          _mapItemTypes.contains(item.type) &&
+          allowedTypes.contains(item.type) &&
           _itemVisibleToRole(item, role),
     );
     for (final item in nearby) {
@@ -649,12 +696,6 @@ class _RoomGamePageState extends State<RoomGamePage> {
   }
 
   void _handleItemPressed(String itemType) {
-    if (_role != PartyMemberRole.runner) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('逃走者のみアイテムを使用できます')),
-      );
-      return;
-    }
     if (!_items.contains(itemType)) {
       return;
     }
@@ -679,6 +720,9 @@ class _RoomGamePageState extends State<RoomGamePage> {
           break;
         case 'FREEZE_TAGGER':
           await _applyFreezeToTagger();
+          break;
+        case 'TRAP':
+          await _deployTrap();
           break;
         default:
           if (!mounted) break;
@@ -956,6 +1000,61 @@ class _RoomGamePageState extends State<RoomGamePage> {
     }
   }
 
+  Future<void> _deployTrap() async {
+    if (_myLastGeo == null) {
+      throw Exception('現在地を取得できません');
+    }
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) {
+      throw Exception('ゲームIDが不明です');
+    }
+    final playerId = widget.args.currentUserId;
+    final firestore = FirebaseFirestore.instance;
+    final trapDoc = await _findOwnedItemDoc(
+      gameId: gameId,
+      playerId: playerId,
+      type: 'TRAP',
+    );
+    if (trapDoc == null) {
+      throw Exception('配置できるトラップがありません');
+    }
+
+    await firestore.runTransaction((tx) async {
+      tx.update(trapDoc, {
+        'state': _ItemStates.armed,
+        'lat': _myLastGeo!.latitude,
+        'lng': _myLastGeo!.longitude,
+        'armedAt': FieldValue.serverTimestamp(),
+        'armedBy': playerId,
+      });
+      final playerRef = firestore
+          .collection('gameSessions')
+          .doc(gameId)
+          .collection('players')
+          .doc(playerId);
+      final snap = await tx.get(playerRef);
+      final items =
+          List<String>.from((snap.data()?['items'] as List<dynamic>?) ?? const []);
+      final removed = items.remove('TRAP');
+      if (removed) {
+        tx.update(playerRef, {
+          'items': items,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+    });
+
+    if (mounted) {
+      setState(() {
+        _items.remove('TRAP');
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('トラップを設置しました')),
+      );
+    }
+  }
+
   Future<void> _markUsedItemDoc(
     String gameId,
     String playerId,
@@ -974,6 +1073,24 @@ class _RoomGamePageState extends State<RoomGamePage> {
       'state': 'USED',
       'updatedAt': FieldValue.serverTimestamp(),
     });
+  }
+
+  Future<DocumentReference<Map<String, dynamic>>?> _findOwnedItemDoc({
+    required String gameId,
+    required String playerId,
+    required String type,
+  }) async {
+    final query = await FirebaseFirestore.instance
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('items')
+        .where('type', isEqualTo: type)
+        .where('pickedBy', isEqualTo: playerId)
+        .where('state', isEqualTo: _ItemStates.picked)
+        .limit(1)
+        .get();
+    if (query.docs.isEmpty) return null;
+    return query.docs.first.reference;
   }
 
   Future<bool> _removeItemFromPlayerDoc({
@@ -1016,6 +1133,56 @@ class _RoomGamePageState extends State<RoomGamePage> {
     );
     if (removed) {
       await _markUsedItemDoc(gameId, playerId, itemType);
+    }
+  }
+
+  Future<void> _triggerTrap(_GameItem trap) async {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    final playerId = widget.args.currentUserId;
+    if (gameId == null || gameId.isEmpty) return;
+    if (_isCurrentlyFrozen) return;
+
+    final firestore = FirebaseFirestore.instance;
+    final trapRef = firestore
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('items')
+        .doc(trap.itemId);
+    final playerRef = firestore
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('players')
+        .doc(playerId);
+
+    await firestore.runTransaction((tx) async {
+      final trapSnap = await tx.get(trapRef);
+      if (!trapSnap.exists) return;
+      final trapState = trapSnap.data()?['state'] as String? ?? '';
+      if (trapState != _ItemStates.armed) return;
+      final now = DateTime.now();
+      tx.update(trapRef, {
+        'state': _ItemStates.used,
+        'triggeredBy': playerId,
+        'triggeredAt': Timestamp.fromDate(now),
+      });
+      tx.update(playerRef, {
+        'freezeOrigin': GeoPoint(trap.lat, trap.lng),
+        'freezeUntil': Timestamp.fromDate(now.add(const Duration(seconds: 5))),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    });
+
+    if (mounted) {
+      setState(() {
+        _freezeOrigin = GeoPoint(trap.lat, trap.lng);
+        _freezeUntil = DateTime.now().add(const Duration(seconds: 5));
+        _freezePopupShown = false;
+        _armedTraps.removeWhere((t) => t.itemId == trap.itemId);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('トラップにかかりました！5秒間動けません')),
+      );
     }
   }
 
@@ -1272,6 +1439,23 @@ class _RoomGamePageState extends State<RoomGamePage> {
       ..addAll(_playerMarkers)
       ..addAll(_itemMarkers)
       ..addAll(_effectMarkers);
+  }
+
+  void _checkTrapCollision(LatLng current, String effectiveRole) {
+    if (effectiveRole != 'RUNNER') return;
+    if (_armedTraps.isEmpty) return;
+    for (final trap in _armedTraps) {
+      final distance = Geolocator.distanceBetween(
+        current.latitude,
+        current.longitude,
+        trap.lat,
+        trap.lng,
+      );
+      if (distance <= 5) {
+        _triggerTrap(trap);
+        break;
+      }
+    }
   }
 // Future<void> _handleTagLogic({
 //   required GeoPoint? myGeo,
@@ -1952,7 +2136,7 @@ Future<void> _debugCatchAllRunners() async {
                           remainingPlayers: remainingPlayers,
                           items: _items,
                           itemLabelResolver: _itemLabelByType,
-                          canUseItems: _role == PartyMemberRole.runner && !_iAmCaught,
+                          canUseItems: !_iAmCaught,
                           itemEnabledResolver: _isItemEnabled,
                           onItemPressed: _handleItemPressed,
                         ),
