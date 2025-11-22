@@ -51,11 +51,50 @@ class _PlayerInfo {
     required this.caught,
   });
 }
+
+class _GameItem {
+  final String itemId;
+  final String type;
+  final String visibility;
+  final String state;
+  final double lat;
+  final double lng;
+
+  const _GameItem({
+    required this.itemId,
+    required this.type,
+    required this.visibility,
+    required this.state,
+    required this.lat,
+    required this.lng,
+  });
+
+  factory _GameItem.fromDoc(
+    QueryDocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final data = doc.data();
+    return _GameItem(
+      itemId: data['itemId'] as String? ?? doc.id,
+      type: data['type'] as String? ?? 'UNKNOWN',
+      visibility: data['visibility'] as String? ?? 'RUNNER',
+      state: data['state'] as String? ?? 'AVAILABLE',
+      lat: (data['lat'] as num?)?.toDouble() ?? 0,
+      lng: (data['lng'] as num?)?.toDouble() ?? 0,
+    );
+  }
+}
+
+const Set<String> _mapItemTypes = {
+  'FREEZE_TAGGER',
+  'SEE_TAGGER',
+  'FAKE_LOCATION',
+};
 class _RoomGamePageState extends State<RoomGamePage> {
   final PartyService _partyService = PartyService();
 
   StreamSubscription<Position>? _posSub;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _playersSub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _itemsSub;
 
   String? _myRoleCode;          // 'TAGGER' / 'RUNNER' / 'PENDING'
   GeoPoint? _myLastGeo;
@@ -65,7 +104,9 @@ class _RoomGamePageState extends State<RoomGamePage> {
   final List<DocumentReference<Map<String, dynamic>>> _nearRunnerRefs = [];
 
   final List<_PlayerInfo> _players = [];
-  
+  final List<_GameItem> _gameItems = [];
+  bool _isPickingItem = false;
+  bool _isUsingItem = false;
 
   late PartyMemberRole _role;
   late _RolePalette _palette;
@@ -88,6 +129,11 @@ class _RoomGamePageState extends State<RoomGamePage> {
   bool _isLocating = true;
   String? _locationError;
   final Set<Marker> _markers = {};
+  final Set<Marker> _playerMarkers = {};
+  final Set<Marker> _itemMarkers = {};
+  final Set<Marker> _effectMarkers = {};
+  Marker? _revealedTaggerMarker;
+  Timer? _revealTimer;
   Set<Polygon> _fieldPolygons = {};
   List<_PlayerInfo> get _otherPlayers =>
       _players.where((p) => !p.isMe && !p.caught).toList();
@@ -185,6 +231,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
     _loadFieldPolygon();
     _startLocationWatch(); // ★ 追加：継続的な位置送信
     _startPlayersWatch();
+    _startItemsWatch();
     _refreshLobbyRole();
   }
   // ★追加: 通知セットアップメソッド
@@ -281,6 +328,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
     );
 
       _checkFieldBoundary(current);
+      _tryPickupNearbyItems(current);
     });
   }
     void _startPlayersWatch() {
@@ -299,6 +347,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
       GeoPoint? myGeo;
       String? myRole;
       bool myCaught = false;
+      List<String>? myItemsList;
 
       for (final doc in snapshot.docs) {
         final data = doc.data();
@@ -316,6 +365,8 @@ class _RoomGamePageState extends State<RoomGamePage> {
           myGeo = geo;
           myRole = role;
           myCaught = caught;
+          final rawItems = (data['items'] as List<dynamic>?) ?? const [];
+          myItemsList = rawItems.cast<String>();
         }
 
         players.add(
@@ -379,6 +430,9 @@ class _RoomGamePageState extends State<RoomGamePage> {
       _myRoleCode = myRole;
       _totalRunners = totalRunners;   // ★追加
       _capturedCount = captured;  
+      _items
+        ..clear()
+        ..addAll(myItemsList ?? const []);
     });
 
     // マーカー描画を更新
@@ -392,6 +446,346 @@ class _RoomGamePageState extends State<RoomGamePage> {
     );
     });
   }
+
+  void _startItemsWatch() {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) return;
+
+    _itemsSub = FirebaseFirestore.instance
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('items')
+        .snapshots()
+        .listen(
+      (snapshot) {
+        final items = snapshot.docs
+            .map(_GameItem.fromDoc)
+            .where((item) => _mapItemTypes.contains(item.type))
+            .toList();
+        if (!mounted) return;
+        final markers = _buildItemMarkers(items);
+        setState(() {
+          _gameItems
+            ..clear()
+            ..addAll(items);
+          _itemMarkers
+            ..clear()
+            ..addAll(markers);
+          _refreshCombinedMarkers();
+        });
+      },
+      onError: (error, stack) {
+        debugPrint('Failed to watch items: $error\n$stack');
+      },
+    );
+  }
+
+  Set<Marker> _buildItemMarkers(List<_GameItem> items) {
+    final markers = <Marker>{};
+    for (final item in items.where(
+      (element) => element.state == 'AVAILABLE',
+    )) {
+      final hue = _itemHueByType(item.type);
+      markers.add(
+        Marker(
+          markerId: MarkerId('item_${item.itemId}'),
+          position: LatLng(item.lat, item.lng),
+          icon: BitmapDescriptor.defaultMarkerWithHue(hue),
+          infoWindow: InfoWindow(
+            title: _itemLabelByType(item.type),
+            snippet: 'アイテムを拾えます',
+          ),
+        ),
+      );
+    }
+    return markers;
+  }
+
+  double _itemHueByType(String type) {
+    switch (type) {
+      case 'FREEZE_TAGGER':
+        return BitmapDescriptor.hueAzure;
+      case 'SEE_TAGGER':
+        return BitmapDescriptor.hueGreen;
+      case 'FAKE_LOCATION':
+        return BitmapDescriptor.hueCyan;
+      default:
+        return BitmapDescriptor.hueRose;
+    }
+  }
+
+  String _itemLabelByType(String type) {
+    switch (type) {
+      case 'FREEZE_TAGGER':
+        return 'フリーズ鬼';
+      case 'SEE_TAGGER':
+        return '鬼を探知';
+      case 'FAKE_LOCATION':
+        return 'フェイク位置';
+      default:
+        return type;
+    }
+  }
+  
+  Future<void> _tryPickupNearbyItems(LatLng current) async {
+    if (_isPickingItem) return;
+    final role = _effectiveRole(_myRoleCode);
+    if (_items.length >= 2) return;
+    if (role == 'PENDING') return;
+
+    final nearby = _gameItems.where(
+      (item) =>
+          item.state == 'AVAILABLE' &&
+          _mapItemTypes.contains(item.type) &&
+          _itemVisibleToRole(item, role),
+    );
+    for (final item in nearby) {
+      final distance = Geolocator.distanceBetween(
+        current.latitude,
+        current.longitude,
+        item.lat,
+        item.lng,
+      );
+      if (distance <= 5) {
+        _isPickingItem = true;
+        try {
+          await _pickupItem(item);
+        } finally {
+          _isPickingItem = false;
+        }
+        break;
+      }
+    }
+  }
+
+  void _handleItemPressed(String itemType) {
+    if (_role != PartyMemberRole.runner) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('逃走者のみアイテムを使用できます')),
+      );
+      return;
+    }
+    if (!_items.contains(itemType)) {
+      return;
+    }
+    if (_isUsingItem) {
+      return;
+    }
+    _useItem(itemType);
+  }
+
+  Future<void> _useItem(String itemType) async {
+    _isUsingItem = true;
+    try {
+      switch (itemType) {
+        case 'SEE_TAGGER':
+          await _revealTaggerLocation();
+          break;
+        default:
+          if (!mounted) break;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('$itemType はまだ実装されていません')),
+          );
+          break;
+      }
+      await _consumeItem(itemType);
+    } catch (e, s) {
+      debugPrint('Failed to use item: $e\n$s');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('アイテムの使用に失敗しました: $e')),
+        );
+      }
+    } finally {
+      _isUsingItem = false;
+    }
+  }
+
+  Future<void> _revealTaggerLocation() async {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) return;
+
+    final query = await FirebaseFirestore.instance
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('players')
+        .where('role', isEqualTo: 'TAGGER')
+        .get();
+
+    final markers = <Marker>{};
+    for (final doc in query.docs) {
+      final data = doc.data();
+      final geo = data['lastLocation'] as GeoPoint?;
+      if (geo == null) continue;
+      markers.add(
+        Marker(
+          markerId: MarkerId('reveal_${doc.id}'),
+          position: LatLng(geo.latitude, geo.longitude),
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+          infoWindow: const InfoWindow(title: '鬼の位置'),
+        ),
+      );
+    }
+
+    if (markers.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('鬼の位置を取得できませんでした')),
+        );
+      }
+      return;
+    }
+
+    setState(() {
+      _effectMarkers
+        ..clear()
+        ..addAll(markers);
+      _refreshCombinedMarkers();
+    });
+
+    _revealTimer?.cancel();
+    _revealTimer = Timer(const Duration(seconds: 5), () {
+      if (!mounted) return;
+      setState(() {
+        _effectMarkers.clear();
+        _refreshCombinedMarkers();
+      });
+    });
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('鬼の位置を5秒間表示します')),
+      );
+    }
+  }
+
+  Future<void> _consumeItem(String itemType) async {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) return;
+    final playerId = widget.args.currentUserId;
+    final firestore = FirebaseFirestore.instance;
+    final playerRef = firestore
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('players')
+        .doc(playerId);
+
+    await firestore.runTransaction((tx) async {
+      final snap = await tx.get(playerRef);
+      final items =
+          List<String>.from((snap.data()?['items'] as List<dynamic>?) ?? const []);
+      final removed = items.remove(itemType);
+      if (!removed) {
+        throw Exception('アイテムが見つかりません');
+      }
+      tx.update(playerRef, {'items': items});
+    });
+
+    await _markUsedItemDoc(gameId, playerId, itemType);
+
+    if (mounted) {
+      setState(() {
+        _items.remove(itemType);
+      });
+    }
+  }
+
+  Future<void> _markUsedItemDoc(
+    String gameId,
+    String playerId,
+    String itemType,
+  ) async {
+    final query = await FirebaseFirestore.instance
+        .collection('gameSessions')
+        .doc(gameId)
+        .collection('items')
+        .where('type', isEqualTo: itemType)
+        .where('pickedBy', isEqualTo: playerId)
+        .limit(1)
+        .get();
+    if (query.docs.isEmpty) return;
+    await query.docs.first.reference.update({
+      'state': 'USED',
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> _pickupItem(_GameItem item) async {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) return;
+    final playerId = widget.args.currentUserId;
+    final firestore = FirebaseFirestore.instance;
+    final gameRef = firestore.collection('gameSessions').doc(gameId);
+    final playerRef = gameRef.collection('players').doc(playerId);
+    final itemRef = gameRef.collection('items').doc(item.itemId);
+
+    try {
+      await firestore.runTransaction((tx) async {
+        final playerSnap = await tx.get(playerRef);
+        final itemSnap = await tx.get(itemRef);
+        if (!playerSnap.exists || !itemSnap.exists) {
+          throw Exception('データを取得できませんでした');
+        }
+        final itemData = itemSnap.data();
+        if ((itemData?['state'] as String?) != 'AVAILABLE') {
+          throw Exception('このアイテムは取得済みです');
+        }
+
+        final existing =
+            List<String>.from((playerSnap.data()?['items'] as List<dynamic>?) ?? const []);
+        if (existing.length >= 2) {
+          throw Exception('これ以上アイテムを持てません');
+        }
+
+        existing.add(item.type);
+
+        tx.update(playerRef, {
+          'items': existing,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+        tx.update(itemRef, {
+          'state': 'PICKED',
+          'pickedBy': playerId,
+          'pickedAt': FieldValue.serverTimestamp(),
+        });
+      });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${_itemLabelByType(item.type)}を入手しました')),
+      );
+    } catch (e, s) {
+      debugPrint('Failed to pickup item: $e\n$s');
+    }
+  }
+
+  bool _itemVisibleToRole(_GameItem item, String role) {
+    if (item.visibility == 'TAGGER' && role != 'TAGGER') {
+      return false;
+    }
+    if (item.visibility == 'RUNNER' && role != 'RUNNER') {
+      return false;
+    }
+    return true;
+  }
+
+  String _effectiveRole(String? snapshotRole) {
+    if (snapshotRole == null || snapshotRole == 'PENDING') {
+      switch (_role) {
+        case PartyMemberRole.tagger:
+          return 'TAGGER';
+        case PartyMemberRole.runner:
+          return 'RUNNER';
+        case PartyMemberRole.pending:
+          return 'PENDING';
+      }
+    }
+    return snapshotRole;
+  }
+
     void _updateCatchAvailability({
   required GeoPoint? myGeo,
   required String? myRole,
@@ -399,19 +793,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
 }) {
   // Firestore側のロールが PENDING でも、
   // ロビー情報 (_role) が鬼なら TAGGER とみなす
-  String effectiveRole;
-
-  if (myRole == null || myRole == 'PENDING') {
-    if (_role == PartyMemberRole.tagger) {
-      effectiveRole = 'TAGGER';
-    } else if (_role == PartyMemberRole.runner) {
-      effectiveRole = 'RUNNER';
-    } else {
-      effectiveRole = 'PENDING';
-    }
-  } else {
-    effectiveRole = myRole;
-  }
+  final effectiveRole = _effectiveRole(myRole);
 
   // デバッグ用ログ
   debugPrint(
@@ -554,10 +936,19 @@ class _RoomGamePageState extends State<RoomGamePage> {
     }
 
     setState(() {
-      _markers
+      _playerMarkers
         ..clear()
         ..addAll(newMarkers);
+      _refreshCombinedMarkers();
     });
+  }
+
+  void _refreshCombinedMarkers() {
+    _markers
+      ..clear()
+      ..addAll(_playerMarkers)
+      ..addAll(_itemMarkers)
+      ..addAll(_effectMarkers);
   }
 // Future<void> _handleTagLogic({
 //   required GeoPoint? myGeo,
@@ -682,6 +1073,8 @@ class _RoomGamePageState extends State<RoomGamePage> {
 
     _posSub?.cancel();
     _playersSub?.cancel();
+    _itemsSub?.cancel();
+    _revealTimer?.cancel();
     final gameId = widget.args.lobby.gameId;
     if (gameId != null) {
       FirebaseMessaging.instance.unsubscribeFromTopic('game_$gameId');
@@ -1222,6 +1615,9 @@ Future<void> _debugCatchAllRunners() async {
                           capturedCount: _capturedCount,
                           remainingPlayers: remainingPlayers,
                           items: _items,
+                          itemLabelResolver: _itemLabelByType,
+                          canUseItems: _role == PartyMemberRole.runner && !_iAmCaught,
+                          onItemPressed: _handleItemPressed,
                         ),
 
                         // 鬼の Catch ボタン
@@ -1433,12 +1829,18 @@ class _StatsBar extends StatelessWidget {
   final int capturedCount;
   final int remainingPlayers;
   final List<String> items;
+  final bool canUseItems;
+  final ValueChanged<String>? onItemPressed;
+  final String Function(String) itemLabelResolver;
 
   const _StatsBar({
     required this.accent,
     required this.capturedCount,
     required this.remainingPlayers,
     required this.items,
+    required this.itemLabelResolver,
+    this.canUseItems = false,
+    this.onItemPressed,
   });
 
   @override
@@ -1491,13 +1893,18 @@ class _StatsBar extends StatelessWidget {
               runSpacing: 8,
               children: visibleItems
                   .map(
-                    (item) => Chip(
-                      label: Text(item),
-                      backgroundColor: accent.withOpacity(0.12),
+                    (item) => ActionChip(
+                      label: Text(itemLabelResolver(item)),
+                      backgroundColor: accent.withOpacity(
+                        canUseItems ? 0.2 : 0.08,
+                      ),
                       labelStyle: TextStyle(
-                        color: accent,
+                        color: canUseItems ? accent : Colors.black45,
                         fontWeight: FontWeight.bold,
                       ),
+                      onPressed: canUseItems && onItemPressed != null
+                          ? () => onItemPressed!(item)
+                          : null,
                     ),
                   )
                   .toList(),
@@ -1707,4 +2114,3 @@ class _RolePalette {
     }
   }
 }
-
