@@ -89,11 +89,12 @@ class _RoomGamePageState extends State<RoomGamePage> {
   final Set<Marker> _markers = {};
   Set<Polygon> _fieldPolygons = {};
   List<_PlayerInfo> get _otherPlayers =>
-        _players.where((p) => !p.isMe).toList();
+      _players.where((p) => !p.isMe && !p.caught).toList();
   List<LatLng> _fieldPoints = [];
   bool _outsideNotified = false;
   bool _navigatedByGameEnd = false;
   bool _iAmCaught = false;
+  bool _showCaughtOverlay = false;
   int _ntpOffset = 0;
 
   bool get _isHost {
@@ -291,6 +292,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
 
         setState(() {
           _iAmCaught = true;        // ← 観戦モードに入ったことを覚えておく
+          _showCaughtOverlay = true;  // ← オーバーレイ表示フラグを立てる
         });
 
         ScaffoldMessenger.of(context).showSnackBar(
@@ -464,7 +466,8 @@ class _RoomGamePageState extends State<RoomGamePage> {
     for (final p in players) {
       // 色をロールで分ける
       if (p.isMe) continue;
-
+      // 捕まったプレイヤーは表示しない
+      if (p.caught) continue;
       double hue;
       if (p.role == 'TAGGER') {
         hue = BitmapDescriptor.hueRed;
@@ -1014,7 +1017,80 @@ Future<void> _debugCatchAllRunners() async {
                     ],
                   ),
                 ),
-
+                // ★追加：捕まったときのモックアップオーバーレイ
+                if (_showCaughtOverlay)
+                  Positioned.fill(
+                    child: Container(
+                      color: Colors.black.withOpacity(0.5),
+                      child: Align(
+                        alignment: const Alignment(0, -0.2), // ← ★ ここで位置調整（-1.0 〜 +1.0）
+                        child: Container(
+                          width: MediaQuery.of(context).size.width * 0.8,
+                          padding: const EdgeInsets.all(24),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.2),
+                                blurRadius: 12,
+                                offset: const Offset(0, 6),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.sentiment_dissatisfied,
+                                size: 70,
+                                color: Colors.redAccent,
+                              ),
+                              const SizedBox(height: 16),
+                              const Text(
+                                'あなたは捕まってしまいました！',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              const Text(
+                                'ゲームが終わるまで、他のプレイヤーを観戦できます。',
+                                textAlign: TextAlign.center,
+                              ),
+                              const SizedBox(height: 24),
+                              SizedBox(
+                                width: double.infinity,
+                                child: FilledButton(
+                                  style: FilledButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(vertical: 14),
+                                    backgroundColor: _palette.accent,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                  ),
+                                  onPressed: () {
+                                    setState(() {
+                                      _showCaughtOverlay = false;
+                                    });
+                                  },
+                                  child: const Text(
+                                    '観戦する',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 // ④ 既存のUI（タイマーやステータス）
                 SafeArea(
                   child: Padding(
