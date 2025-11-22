@@ -44,6 +44,8 @@ class _RoomGamePageState extends State<RoomGamePage> {
   Timer? _gameTimer;
   String? _initErrorMessage;
   StreamSubscription<List<GameItem>>? _itemsSub;
+  String? _playerId;
+  bool _isPickingItem = false;
 
   GoogleMapController? _mapController;
   LatLng? _currentLatLng;
@@ -71,53 +73,10 @@ class _RoomGamePageState extends State<RoomGamePage> {
       _startCountdown();
       _loadCurrentLocation();
       _loadFieldPolygon();
-      // subscribe to game items for runners if gameId provided
       final gameId = widget.args.gameId;
-      if (gameId != null && _role == PartyMemberRole.runner) {
-        _itemsSub = _partyService.watchGameItems(gameId).listen((items) {
-          // show one per type for requested types and place pins on map
-          const typesToShow = {'FAKE_LOCATION', 'FREEZE_TAGGER', 'SEE_TAGGER'};
-          final Map<String, GameItem> picked = {};
-          for (final it in items) {
-            if (typesToShow.contains(it.type) && it.state == 'AVAILABLE') {
-              // keep first seen per type
-              if (!picked.containsKey(it.type)) {
-                picked[it.type] = it;
-              }
-            }
-          }
-
-          if (mounted) {
-            setState(() {
-              _visibleItems
-                ..clear()
-                ..addAll(picked);
-
-              _items
-                ..clear()
-                ..addAll(picked.keys);
-
-              // update markers: remove existing item markers and add new ones
-              _markers.removeWhere((m) => m.markerId.value.startsWith('item_'));
-              for (final it in _visibleItems.values) {
-                final pos = LatLng(it.lat, it.lng);
-                // only show item pins if inside the field polygon
-                if (!_isPointInAnyField(pos)) continue;
-                final hue = it.type == 'FAKE_LOCATION'
-                    ? BitmapDescriptor.hueAzure
-                    : (it.type == 'SEE_TAGGER' ? BitmapDescriptor.hueGreen : BitmapDescriptor.hueViolet);
-                _markers.add(
-                  Marker(
-                    markerId: MarkerId('item_${it.itemId}'),
-                    position: pos,
-                    infoWindow: InfoWindow(title: it.type),
-                    icon: BitmapDescriptor.defaultMarkerWithHue(hue),
-                  ),
-                );
-              }
-            });
-          }
-        });
+      if (gameId != null && _role != PartyMemberRole.pending) {
+        _fetchPlayerId(gameId);
+        _subscribeToGameItems(gameId);
       }
     }
   }
@@ -270,23 +229,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
         };
         // after loading the polygon, if we already have visible items, ensure markers
         if (_visibleItems.isNotEmpty) {
-          _markers.removeWhere((m) => m.markerId.value.startsWith('item_'));
-          for (final it in _visibleItems.values) {
-            final pos = LatLng(it.lat, it.lng);
-            if (!_isPointInAnyField(pos)) continue;
-            _markers.add(
-              Marker(
-                markerId: MarkerId('item_${it.itemId}'),
-                position: pos,
-                infoWindow: InfoWindow(title: it.type),
-                icon: BitmapDescriptor.defaultMarkerWithHue(
-                  it.type == 'FAKE_LOCATION'
-                      ? BitmapDescriptor.hueAzure
-                      : BitmapDescriptor.hueViolet,
-                ),
-              ),
-            );
-          }
+          _refreshItemMarkers();
         }
       });
     } catch (e, s) {
@@ -298,6 +241,132 @@ class _RoomGamePageState extends State<RoomGamePage> {
     Navigator.of(context).pushNamedAndRemoveUntil(
       AppRoutes.home,
       (route) => false,
+    );
+  }
+
+  void _subscribeToGameItems(String gameId) {
+    final typesToShow = _role == PartyMemberRole.runner
+        ? const {'FAKE_LOCATION', 'FREEZE_TAGGER', 'SEE_TAGGER'}
+        : const {'TRAP', 'FAKE_LOCATION_TAGGER', 'SEE_RUNNER'};
+    if (typesToShow.isEmpty) return;
+
+    _itemsSub = _partyService.watchGameItems(gameId).listen((items) {
+      final Map<String, GameItem> picked = {};
+      for (final it in items) {
+        if (typesToShow.contains(it.type) && it.state == 'AVAILABLE') {
+          picked.putIfAbsent(it.type, () => it);
+        }
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _visibleItems
+          ..clear()
+          ..addAll(picked);
+
+        if (_role == PartyMemberRole.runner) {
+          _items
+            ..clear()
+            ..addAll(picked.keys);
+        } else {
+          _items.clear();
+        }
+
+        _refreshItemMarkers();
+      });
+    });
+  }
+
+  Future<void> _fetchPlayerId(String gameId) async {
+    try {
+      final playerId =
+          await _partyService.findPlayerIdByUser(gameId, widget.args.currentUserId);
+      if (!mounted) return;
+      setState(() {
+        _playerId = playerId;
+      });
+    } catch (e, s) {
+      debugPrint('Failed to fetch playerId: $e\n$s');
+      if (mounted) {
+        _showSnack('プレイヤー情報の取得に失敗しました');
+      }
+    }
+  }
+
+  Future<String?> _ensurePlayerId() async {
+    if (_playerId != null) return _playerId;
+    final gameId = widget.args.gameId;
+    if (gameId == null) return null;
+    await _fetchPlayerId(gameId);
+    if (_playerId == null) {
+      _showSnack('プレイヤー情報が見つかりません');
+    }
+    return _playerId;
+  }
+
+  void _refreshItemMarkers() {
+    _markers.removeWhere((m) => m.markerId.value.startsWith('item_'));
+    for (final it in _visibleItems.values) {
+      final pos = LatLng(it.lat, it.lng);
+      if (!_isPointInAnyField(pos)) continue;
+      _markers.add(
+        Marker(
+          markerId: MarkerId('item_${it.itemId}'),
+          position: pos,
+          infoWindow: InfoWindow(title: it.type),
+          icon: BitmapDescriptor.defaultMarkerWithHue(_itemHue(it.type)),
+          onTap: () => _onItemMarkerTapped(it),
+        ),
+      );
+    }
+  }
+
+  double _itemHue(String type) {
+    switch (type) {
+      case 'FAKE_LOCATION':
+        return BitmapDescriptor.hueAzure;
+      case 'SEE_TAGGER':
+        return BitmapDescriptor.hueGreen;
+      case 'FREEZE_TAGGER':
+        return BitmapDescriptor.hueViolet;
+      case 'TRAP':
+        return BitmapDescriptor.hueRed;
+      case 'FAKE_LOCATION_TAGGER':
+        return BitmapDescriptor.hueOrange;
+      case 'SEE_RUNNER':
+        return BitmapDescriptor.hueBlue;
+      default:
+        return BitmapDescriptor.hueAzure;
+    }
+  }
+
+  Future<void> _onItemMarkerTapped(GameItem item) async {
+    if (_isPickingItem) return;
+    final gameId = widget.args.gameId;
+    if (gameId == null) return;
+    final playerId = await _ensurePlayerId();
+    if (playerId == null) return;
+
+    setState(() => _isPickingItem = true);
+    final success = await _partyService.pickupItem(
+      gameId: gameId,
+      itemId: item.itemId,
+      playerId: playerId,
+    );
+    if (!mounted) return;
+    setState(() => _isPickingItem = false);
+
+    if (success) {
+      _showSnack('${item.type} を取得しました');
+    } else {
+      _showSnack('アイテム取得に失敗しました');
+    }
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
     );
   }
 

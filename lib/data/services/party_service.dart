@@ -584,7 +584,8 @@ class PartyService {
 
     final rand = Random(_stableHash(itemSeed));
 
-    for (var i = 0; i < itemCount; i++) {
+    const itemTypes = ['SEE_TAGGER', 'FREEZE_TAGGER', 'FAKE_LOCATION', 'TRAP', 'FAKE_LOCATION_TAGGER', 'SEE_RUNNER'];
+    for (final type in itemTypes) {
       // sample a point inside polygon if possible, otherwise random bbox
       LatLng pos;
       if (polygon.isNotEmpty) {
@@ -594,8 +595,6 @@ class PartyService {
       }
 
       final itemRef = gameRef.collection('items').doc();
-      final types = ['SEE_TAGGER', 'FAKE_LOCATION', 'FREEZE_TAGGER', 'TRAP', 'FREEZE_ALL'];
-      final type = types[rand.nextInt(types.length)];
       final visibility = rand.nextBool() ? 'TAGGER' : 'RUNNER';
 
       batch.set(itemRef, {
@@ -646,6 +645,15 @@ class PartyService {
     final itemsRef = _firestore.collection('gameSessions').doc(gameId).collection('items');
     return itemsRef.snapshots().map((snap) =>
         snap.docs.map((d) => GameItem.fromDoc(d)).toList(growable: false));
+  }
+
+  Future<String?> findPlayerIdByUser(String gameId, String userId) async {
+    final playersRef = _firestore.collection('gameSessions').doc(gameId).collection('players');
+    final snap = await playersRef.where('userId', isEqualTo: userId).limit(1).get();
+    if (snap.docs.isEmpty) return null;
+    final doc = snap.docs.first;
+    final data = doc.data();
+    return data['playerId'] as String? ?? doc.id;
   }
 
   /// Attempt to pick up an item for a player.
