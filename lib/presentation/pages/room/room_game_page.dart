@@ -6,7 +6,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../../data/services/party_service.dart';
 import '../../routes.dart';
-
+import 'game_over_page.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:ntp/ntp.dart'; // ★追加
 import 'package:turf/turf.dart' as turf;
@@ -227,6 +227,18 @@ class _RoomGamePageState extends State<RoomGamePage> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('捕まってしまいました…！')),
         );
+        //Game Over時の画面遷移
+        Future.microtask(() {
+          if (!mounted) return;
+          Navigator.of(context).pushReplacementNamed(
+            AppRoutes.gameOver, // ←あなたのルート名に合わせて変更
+            arguments: GameOverPageArgs(
+              lobby: _latestLobby ?? widget.args.lobby,
+              gameId: widget.args.gameId,
+              currentUserId: widget.args.currentUserId,
+            ),
+          );
+        });
       }
     }
 
