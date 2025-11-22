@@ -104,7 +104,11 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
                 _roleRevealShown = false;
               }
 
-              if (rolesAssigned && !_roleRevealShown && currentMember != null) {
+              if (rolesAssigned &&
+                  !_roleRevealShown &&
+                  currentMember != null &&
+                  !_isStartingGame &&
+                  !_hasNavigatedToGame) {
                 _roleRevealShown = true;
                 WidgetsBinding.instance.addPostFrameCallback((_) {
                   _openRoleReveal(lobby, currentMember);
@@ -266,7 +270,11 @@ class _RoomLobbyPageState extends State<RoomLobbyPage> {
       return;
     }
     if (_isStartingGame) return;
-    setState(() => _isStartingGame = true);
+    setState(() {
+      _isStartingGame = true;
+      // 役割確認を再度挟まないようにする
+      _roleRevealShown = true;
+    });
 
     try {
       if (!mounted) return;
