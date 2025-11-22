@@ -498,7 +498,18 @@ class _RoomGamePageState extends State<RoomGamePage> {
         'caughtBy': widget.args.currentUserId,
       });
     }
-    final myName = _players.firstWhere((p) => p.isMe).name;
+    final myName = _players.firstWhere(
+      (p) => p.isMe,
+      orElse: () => const _PlayerInfo(
+        id: '',
+        name: '不明なプレイヤー',
+        position: LatLng(0, 0),
+        role: '',
+        isMe: true,
+        inside: false,
+        caught: false,
+      ),
+    ).name;
     await _sendNotification('確保！', '$myName が逃走者を捕まえました！');
     if (mounted) {
       setState(() {
@@ -1696,5 +1707,4 @@ class _RolePalette {
     }
   }
 }
-
 
