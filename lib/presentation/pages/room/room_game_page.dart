@@ -655,6 +655,9 @@ class _RoomGamePageState extends State<RoomGamePage> {
       if (type == 'TRAP') {
         return true;
       }
+      if (type == 'FAKE_LOCATION_TAGGER') {
+        return false;
+      }
       return type != 'FAKE_LOCATION';
     }
     return false;
@@ -761,10 +764,19 @@ class _RoomGamePageState extends State<RoomGamePage> {
       final data = doc.data();
       final geo = data['lastLocation'] as GeoPoint?;
       if (geo == null) continue;
+      var position = LatLng(geo.latitude, geo.longitude);
+      final taggerItems =
+          List<String>.from((data['items'] as List<dynamic>?) ?? const []);
+      if (taggerItems.contains('FAKE_LOCATION_TAGGER')) {
+        position = await _maybeApplyTaggerFakeLocation(
+          realPosition: position,
+          taggerId: doc.id,
+        );
+      }
       markers.add(
         Marker(
           markerId: MarkerId('reveal_${doc.id}'),
-          position: LatLng(geo.latitude, geo.longitude),
+          position: position,
           icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
           infoWindow: const InfoWindow(title: '鬼の位置'),
         ),
@@ -1184,6 +1196,27 @@ class _RoomGamePageState extends State<RoomGamePage> {
         const SnackBar(content: Text('トラップにかかりました！5秒間動けません')),
       );
     }
+  }
+
+  Future<LatLng> _maybeApplyTaggerFakeLocation({
+    required LatLng realPosition,
+    required String taggerId,
+  }) async {
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) {
+      return realPosition;
+    }
+    final removed = await _removeItemFromPlayerDoc(
+      gameId: gameId,
+      playerId: taggerId,
+      itemType: 'FAKE_LOCATION_TAGGER',
+    );
+    if (!removed) {
+      return realPosition;
+    }
+    await _markUsedItemDoc(gameId, taggerId, 'FAKE_LOCATION_TAGGER');
+    return _generateFakeLocation(realPosition);
   }
 
   LatLng _generateFakeLocation(LatLng base) {
