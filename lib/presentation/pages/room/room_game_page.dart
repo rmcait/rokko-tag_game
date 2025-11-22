@@ -108,6 +108,9 @@ class _RoomGamePageState extends State<RoomGamePage> {
   bool _isPickingItem = false;
   bool _isUsingItem = false;
   bool _freezeReady = false;
+  double _taggerGauge = 0;
+  LatLng? _lastGaugePoint;
+  bool _isListeningAbilityActive = false;
 
   late PartyMemberRole _role;
   late _RolePalette _palette;
@@ -337,6 +340,7 @@ class _RoomGamePageState extends State<RoomGamePage> {
       setState(() {
         _currentLatLng = current;
       });
+      _updateTaggerGauge(current);
 
     // Firestore に自分の位置を書き込む
     final gameId = widget.args.lobby.gameId;
@@ -499,6 +503,10 @@ class _RoomGamePageState extends State<RoomGamePage> {
         ..addAll(myItemsList ?? const []);
       _freezeReady = freezeReady;
       _lastTaggerGeo = taggerGeo;
+      if (_effectiveRole(myRole) != 'TAGGER') {
+        _taggerGauge = 0;
+        _lastGaugePoint = null;
+      }
     });
 
     // マーカー描画を更新
@@ -745,6 +753,89 @@ class _RoomGamePageState extends State<RoomGamePage> {
       );
     }
   }
+  Future<void> _triggerListenAbility() async {
+    if (_taggerGauge < 1 || _isListeningAbilityActive) {
+      return;
+    }
+    final lobby = _latestLobby ?? widget.args.lobby;
+    final gameId = lobby.gameId;
+    if (gameId == null || gameId.isEmpty) return;
+
+    setState(() {
+      _isListeningAbilityActive = true;
+      _taggerGauge = 0;
+      _lastGaugePoint = _currentLatLng;
+    });
+
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('gameSessions')
+          .doc(gameId)
+          .collection('players')
+          .where('role', isEqualTo: 'RUNNER')
+          .get();
+      final markers = <Marker>{};
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final geo = data['lastLocation'] as GeoPoint?;
+        if (geo == null) continue;
+        markers.add(
+          Marker(
+            markerId: MarkerId('listen_${doc.id}'),
+            position: LatLng(geo.latitude, geo.longitude),
+            icon: BitmapDescriptor.defaultMarkerWithHue(
+              BitmapDescriptor.hueOrange,
+            ),
+            infoWindow: InfoWindow(
+              title: data['displayName'] as String? ?? 'Runner',
+            ),
+          ),
+        );
+      }
+      if (markers.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('逃走者の位置を取得できませんでした')),
+          );
+        }
+      } else {
+        setState(() {
+          _effectMarkers
+            ..clear()
+            ..addAll(markers);
+          _refreshCombinedMarkers();
+        });
+        _revealTimer?.cancel();
+        _revealTimer = Timer(const Duration(seconds: 5), () {
+          if (!mounted) return;
+          setState(() {
+            _effectMarkers.clear();
+            _refreshCombinedMarkers();
+          });
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('逃走者の位置を5秒間表示します')),
+          );
+        }
+      }
+    } catch (e, s) {
+      debugPrint('Failed to trigger listen ability: $e\n$s');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('リッスン発動に失敗しました: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isListeningAbilityActive = false;
+        });
+      } else {
+        _isListeningAbilityActive = false;
+      }
+    }
+  }
 
   Future<void> _consumeItem(String itemType) async {
     final lobby = _latestLobby ?? widget.args.lobby;
@@ -779,6 +870,33 @@ class _RoomGamePageState extends State<RoomGamePage> {
         }
       });
     }
+  }
+
+  void _updateTaggerGauge(LatLng current) {
+    final role = _effectiveRole(_myRoleCode);
+    if (role != 'TAGGER' || _iAmCaught) {
+      _lastGaugePoint = null;
+      return;
+    }
+    if (_isListeningAbilityActive) {
+      return;
+    }
+    final prev = _lastGaugePoint;
+    _lastGaugePoint = current;
+    if (prev == null) {
+      return;
+    }
+    final distance = Geolocator.distanceBetween(
+      prev.latitude,
+      prev.longitude,
+      current.latitude,
+      current.longitude,
+    );
+    if (distance <= 0) return;
+    final increment = distance / 500.0; // 5m で 1%
+    setState(() {
+      _taggerGauge = (_taggerGauge + increment).clamp(0.0, 1.0);
+    });
   }
 
   Future<void> _applyFreezeToTagger() async {
@@ -1743,6 +1861,19 @@ Future<void> _debugCatchAllRunners() async {
                           ),
                         ],
 
+                        if (_role == PartyMemberRole.tagger && !_iAmCaught) ...[
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: _GaugeAbilityButton(
+                              progress: _taggerGauge.clamp(0.0, 1.0),
+                              enabled: _taggerGauge >= 1 && !_isListeningAbilityActive,
+                              onPressed: _triggerListenAbility,
+                              label: 'リッスン',
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                        ],
+
                         _StatsBar(
                           accent: _palette.accent,
                           capturedCount: _capturedCount,
@@ -2069,6 +2200,83 @@ class _StatsBar extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _GaugeAbilityButton extends StatelessWidget {
+  final double progress;
+  final bool enabled;
+  final VoidCallback onPressed;
+  final String label;
+
+  const _GaugeAbilityButton({
+    required this.progress,
+    required this.enabled,
+    required this.onPressed,
+    required this.label,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const size = 80.0;
+    final activeColor = const Color.fromARGB(255, 70, 156, 248);
+    final inactiveColor = Colors.tealAccent.withOpacity(0.35);
+    final baseGlow = Colors.teal.withOpacity(0.25);
+    final borderColor = enabled ? Colors.white : Colors.white60;
+    return Column(
+      children: [
+        GestureDetector(
+          onTap: enabled ? onPressed : null,
+          child: SizedBox(
+            width: size,
+            height: size,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Container(
+                  width: size,
+                  height: size,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: baseGlow,
+                    border: Border.all(color: borderColor, width: 2),
+                    boxShadow: [
+                      BoxShadow(
+                        color: activeColor.withOpacity(enabled ? 0.6 : 0.2),
+                        blurRadius: 12,
+                        spreadRadius: 1,
+                      ),
+                    ],
+                  ),
+                ),
+                CircularProgressIndicator(
+                  value: progress.clamp(0.0, 1.0),
+                  strokeWidth: 6,
+                  backgroundColor: Colors.white24,
+                  valueColor: AlwaysStoppedAnimation<Color>(
+                    enabled ? activeColor : inactiveColor,
+                  ),
+                ),
+                Icon(
+                  Icons.radar,
+                  color: enabled ? Colors.white : Colors.white70,
+                  size: 32,
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.white.withOpacity(enabled ? 0.95 : 0.65),
+            fontWeight: FontWeight.bold,
+            letterSpacing: 0.5,
+          ),
+        ),
+      ],
     );
   }
 }
