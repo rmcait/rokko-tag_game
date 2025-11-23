@@ -492,87 +492,113 @@ class PartyService {
     return _partyLobbyFromSnapshots(partyDoc, membersSnap.docs);
   }
   Future<String> startGame(PartyLobbyData lobby) async {
-    final partyRef = _parties.doc(lobby.partyId);
-    final partySnapshot = await partyRef.get();
-    final partyData = partySnapshot.data();
-    final polygon = _parsePolygonPoints(
-      partyData?['area']?['polygon'] as List<dynamic>?,
-    );
-    final seed = (partyData?['itemSeed'] as String?) ?? lobby.partyId;
-    final runnerItems = _generateInitialItemsForGame(
-      polygon: polygon,
-      seed: '$seed-runner',
-      types: _runnerItemTypes,
-    );
-    final taggerItems = _generateInitialItemsForGame(
-      polygon: polygon,
-      seed: '$seed-tagger',
-      types: _taggerItemTypes,
-    );
-    final initialItems = [...runnerItems, ...taggerItems];
+  final partyRef = _parties.doc(lobby.partyId);
+  final partySnapshot = await partyRef.get();
+  final partyData = partySnapshot.data();
 
-    final batch = _firestore.batch();
+  // フィールドポリゴン取得
+  final polygon = _parsePolygonPoints(
+    partyData?['area']?['polygon'] as List<dynamic>?,
+  );
 
-    // 1. gameSessions ドキュメントを作成 (DB定義書 2.3)
-    final gameRef = _firestore.collection('gameSessions').doc();
-    final gameId = gameRef.id;
-
-    batch.set(gameRef, {
-      'gameId': gameId,
-      'partyId': lobby.partyId,
-      'status': 'ACTIVE',
-      'startAt': FieldValue.serverTimestamp(),
-      'freezeUntil': Timestamp.fromDate(
-        DateTime.now().add(const Duration(seconds: 30)),
-      ),
-      'durationMinutes': lobby.durationMinutes,
-      // area情報などはlobbyから取得して設定してください
-      'createdAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
-
-    // 2. 参加者を gameSessions/players にコピー（ドキュメントID = userId に固定）
-    for (final member in lobby.allMembers) {
-      final playerRef = gameRef.collection('players').doc(member.userId);
-      batch.set(playerRef, {
-        'playerId': playerRef.id,
-        'userId': member.userId,
-        'displayName': member.name,
-        'role': member.role.code,
-        'status': 'ACTIVE',
-        'caught': false,
-        'inside': true, // ★★★ これを追加！
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-    }
-
-    // 2.5 ゲーム開始時に初期アイテムをスポーン (database.md 参照)
-    for (final item in initialItems) {
-      final itemRef = gameRef.collection('items').doc(item.itemId);
-      batch.set(itemRef, {
-        'itemId': item.itemId,
-        'type': item.type,
-        'visibility': item.visibility,
-        'lat': item.lat,
-        'lng': item.lng,
-        'spawnedAt': FieldValue.serverTimestamp(),
-        'pickedBy': null,
-        'state': 'AVAILABLE',
-      });
-    }
-
-    // 3. parties の status を IN_PROGRESS に更新し gameId を紐付け
-    // これにより StreamBuilder が反応して全員遷移する
-    batch.update(partyRef, {
-      'status': 'IN_PROGRESS',
-      'gameId': gameId,
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
-
-    await batch.commit();
-
-    return gameId;
+  // ★ フィールド中心（mockの初期位置に使う）
+  LatLng? mockCenter;
+  if (polygon != null && polygon.isNotEmpty) {
+    final avgLat =
+        polygon.map((p) => p.latitude).reduce((a, b) => a + b) / polygon.length;
+    final avgLng =
+        polygon.map((p) => p.longitude).reduce((a, b) => a + b) / polygon.length;
+    mockCenter = LatLng(avgLat, avgLng);
   }
+
+  // アイテム生成（元々の処理）
+  final seed = (partyData?['itemSeed'] as String?) ?? lobby.partyId;
+  final runnerItems = _generateInitialItemsForGame(
+    polygon: polygon,
+    seed: '$seed-runner',
+    types: _runnerItemTypes,
+  );
+  final taggerItems = _generateInitialItemsForGame(
+    polygon: polygon,
+    seed: '$seed-tagger',
+    types: _taggerItemTypes,
+  );
+  final initialItems = [...runnerItems, ...taggerItems];
+
+  final batch = _firestore.batch();
+
+  // gameSessions 作成
+  final gameRef = _firestore.collection('gameSessions').doc();
+  final gameId = gameRef.id;
+
+  batch.set(gameRef, {
+    'gameId': gameId,
+    'partyId': lobby.partyId,
+    'status': 'ACTIVE',
+    'startAt': FieldValue.serverTimestamp(),
+    'freezeUntil': Timestamp.fromDate(
+      DateTime.now().add(const Duration(seconds: 30)),
+    ),
+    'durationMinutes': lobby.durationMinutes,
+    'createdAt': FieldValue.serverTimestamp(),
+    'updatedAt': FieldValue.serverTimestamp(),
+  });
+
+  // ★ ホストを TAGGER に固定
+  final hostId = lobby.owner.userId;
+
+  // players 作成
+  for (final member in lobby.allMembers) {
+    final playerRef = gameRef.collection('players').doc(member.userId);
+
+    final isHost = member.userId == hostId;
+    final role =
+        isHost ? PartyMemberRole.tagger.code : PartyMemberRole.runner.code;
+
+    final data = <String, dynamic>{
+      'playerId': playerRef.id,
+      'userId': member.userId,
+      'displayName': member.name,
+      'role': role,
+      'status': 'ACTIVE',
+      'caught': false,
+      'inside': true,
+      'createdAt': FieldValue.serverTimestamp(),
+    };
+
+    // ★ モックメンバーはフィールド中心に配置
+    if (member.isMock && mockCenter != null) {
+      data['position'] = GeoPoint(mockCenter.latitude, mockCenter.longitude);
+    }
+
+    batch.set(playerRef, data);
+  }
+
+  // 初期アイテム生成
+  for (final item in initialItems) {
+    final itemRef = gameRef.collection('items').doc(item.itemId);
+    batch.set(itemRef, {
+      'itemId': item.itemId,
+      'type': item.type,
+      'visibility': item.visibility,
+      'lat': item.lat,
+      'lng': item.lng,
+      'spawnedAt': FieldValue.serverTimestamp(),
+      'pickedBy': null,
+      'state': 'AVAILABLE',
+    });
+  }
+
+  // parties 更新
+  batch.update(partyRef, {
+    'status': 'IN_PROGRESS',
+    'gameId': gameId,
+    'updatedAt': FieldValue.serverTimestamp(),
+  });
+
+  await batch.commit();
+  return gameId;
+}
 
   Future<void> updateGameStatus({
     required String gameId,
